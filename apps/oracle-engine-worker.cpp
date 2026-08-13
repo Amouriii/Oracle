@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
 
   oracle::KvCache kv;
   kv.allocate(oracle::plan_kv(orch.config().model, orch.runner()->layers()));
-  std::cout << "oracle-engine-worker id=" << id << " prev=" << prev << " next=" << next << " last=" << last << "\n";
+  std::cout << "Oracle worker id=" << id << " prev=" << prev << " next=" << next << " last=" << last << "\n";
 
   while (true) {
     oracle::Tensor in;

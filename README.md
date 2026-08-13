@@ -1,6 +1,6 @@
-# oracle-llm-engine
+# Oracle
 
-Standalone **C++20** Thunderbolt-3 LLM engine: packed tensor transport, RAM/VRAM sharding, pipeline orchestration, and pluggable **Accelerate / Metal GEMM + llama.cpp** runners. Oracle-AI (or curl) talks OpenAI HTTP to the master on **:8000**.
+**Oracle** is the standalone **C++20** Thunderbolt-3 LLM engine: packed tensor transport, RAM/VRAM sharding, pipeline orchestration, and pluggable **Accelerate / Metal GEMM + llama.cpp** runners. Oracle-AI (or curl) talks OpenAI HTTP to the master on **:8000**.
 
 70B Q4 is a **RAM pipeline** across machines, not a single-GPU model. 2018 dGPUs (~2–4 GB) are a small hot cache.
 

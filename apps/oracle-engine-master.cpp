@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
     }
   }
   const uint16_t port = cfg.http_port ? cfg.http_port : 8000;
-  std::cout << "oracle-engine-master listening OpenAI http://0.0.0.0:" << port << " runner=" << runner
+  std::cout << "Oracle listening OpenAI http://0.0.0.0:" << port << " runner=" << runner
             << " single=" << single << "\n";
   st = orch.serve_openai(port);
   if (!st) {

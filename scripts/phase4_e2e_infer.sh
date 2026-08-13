@@ -20,5 +20,5 @@ echo
 echo "== POST /v1/chat/completions =="
 curl -sS "http://127.0.0.1:${PORT}/v1/chat/completions" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"oracle-engine","messages":[{"role":"user","content":"hi"}],"max_tokens":8}' || true
+  -d '{"model":"Oracle","messages":[{"role":"user","content":"hi"}],"max_tokens":8}' || true
 echo

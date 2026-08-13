@@ -107,10 +107,10 @@ Status run_openai_server(PipelineOrchestrator& orch, uint16_t port) {
     res.set_content("{\"status\":\"ok\"}", "application/json");
   });
   svr.Get("/v1/models", [&orch](const httplib::Request&, httplib::Response& res) {
-    const auto& m = orch.config().model.name.empty() ? std::string("oracle-engine") : orch.config().model.name;
+    const auto& m = orch.config().model.name.empty() ? std::string("Oracle") : orch.config().model.name;
     std::ostringstream os;
     os << "{\"object\":\"list\",\"data\":[{\"id\":\"" << json_escape(m)
-       << "\",\"object\":\"model\",\"owned_by\":\"oracle-llm-engine\"}]}";
+       << "\",\"object\":\"model\",\"owned_by\":\"Oracle\"}]}";
     res.set_content(os.str(), "application/json");
   });
   auto handle_chat = [&orch](const httplib::Request& req, httplib::Response& res) {
@@ -150,7 +150,7 @@ Status run_openai_server(PipelineOrchestrator& orch, uint16_t port) {
     auto st = orch.generate(gr, [&](const GenerateToken& t) { acc += t.text; });
     std::ostringstream os;
     os << "{\"id\":\"cmpl-oracle\",\"object\":\"chat.completion\",\"model\":\""
-       << json_escape(gr.model.empty() ? "oracle-engine" : gr.model)
+       << json_escape(gr.model.empty() ? "Oracle" : gr.model)
        << "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" << json_escape(acc)
        << "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":"
        << acc.size() << "}}";
