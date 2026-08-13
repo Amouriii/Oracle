@@ -1,0 +1,44 @@
+[cluster]
+name = "tb3-mesh"
+heartbeat_port = 9100
+http_port = 8000
+transport_port = 9200
+mtu = 9000
+heartbeat_misses = 5
+heartbeat_interval_ms = 200
+
+[model]
+name = "llama-70b-q4"
+path = ""
+n_layers = 80
+hidden_dim = 8192
+n_heads = 64
+n_kv_heads = 8
+head_dim = 128
+n_vocab = 32000
+max_seq = 4096
+dtype = "q4"
+act_dtype = "f16"
+# ~40 GiB Q4 / 80 layers
+bytes_per_layer = 536870912
+
+[[nodes]]
+id = 0
+role = "master"
+host = "10.10.0.1"
+ram_budget_gb = 32.0
+vram_budget_gb = 4.0
+
+[[nodes]]
+id = 1
+role = "worker"
+host = "10.10.0.2"
+ram_budget_gb = 32.0
+vram_budget_gb = 4.0
+
+[[nodes]]
+id = 2
+role = "worker"
+host = "10.10.0.3"
+ram_budget_gb = 32.0
+vram_budget_gb = 4.0

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "oracle-engine"
+version = "0.1.0"
+description = "Thunderbolt-3 sharded LLM engine: transport, RAM pipeline, OpenAI HTTP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+oracle-cluster = "oracle_engine.cluster:main"
+oracle-bench = "oracle_engine.bench:main"
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+wheel.packages = ["python/oracle_engine"]
