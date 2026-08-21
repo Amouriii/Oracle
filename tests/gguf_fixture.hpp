@@ -4,6 +4,7 @@
 // so the loader, the dequantisers, the tokeniser and the transformer graph can
 // all be tested without downloading a multi-gigabyte model.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,18 @@
 #include <vector>
 
 namespace oracle_test {
+
+// ggml type ids the fixture can emit.
+enum class Quant { F32 = 0, Q8_0 = 8, Q4_0 = 2 };
+
+inline const char* quant_name(Quant q) {
+  switch (q) {
+    case Quant::F32: return "F32";
+    case Quant::Q8_0: return "Q8_0";
+    case Quant::Q4_0: return "Q4_0";
+  }
+  return "?";
+}
 
 struct TinyModel {
   uint32_t n_layers = 2;
@@ -89,8 +102,40 @@ class GgufWriter {
     Tensor t;
     t.name = name;
     t.ne = ne;
+    t.type = 0;
     t.bytes.resize(data.size() * 4);
     std::memcpy(t.bytes.data(), data.data(), data.size() * 4);
+    tensors_.push_back(std::move(t));
+  }
+
+  // Quantises row by row, exactly as ggml does.  Rows shorter than a block, and
+  // 1-D tensors (the norm weights), stay F32 -- which is also what llama.cpp's
+  // own quantiser does.
+  void tensor_quant(const std::string& name, const std::vector<uint64_t>& ne,
+                    const std::vector<float>& data, Quant q) {
+    const uint64_t cols = ne.empty() ? 0 : ne[0];
+    if (q == Quant::F32 || ne.size() < 2 || cols % 32 != 0) {
+      tensor_f32(name, ne, data);
+      return;
+    }
+    uint64_t rows = 1;
+    for (size_t i = 1; i < ne.size(); ++i) {
+      rows *= ne[i];
+    }
+    Tensor t;
+    t.name = name;
+    t.ne = ne;
+    t.type = static_cast<uint32_t>(q);
+    for (uint64_t r = 0; r < rows; ++r) {
+      const float* row = data.data() + r * cols;
+      for (uint64_t b = 0; b < cols; b += 32) {
+        if (q == Quant::Q8_0) {
+          quantize_q8_0(row + b, t.bytes);
+        } else {
+          quantize_q4_0(row + b, t.bytes);
+        }
+      }
+    }
     tensors_.push_back(std::move(t));
   }
 
@@ -112,7 +157,7 @@ class GgufWriter {
       for (uint64_t d : t.ne) {
         append_u64(dir, d);
       }
-      append_u32(dir, 0);  // GGML_F32
+      append_u32(dir, t.type);
       append_u64(dir, offsets[i]);
     }
 
@@ -147,8 +192,64 @@ class GgufWriter {
   struct Tensor {
     std::string name;
     std::vector<uint64_t> ne;
+    uint32_t type = 0;
     std::vector<uint8_t> bytes;
   };
+
+  static uint16_t to_half(float value) {
+    uint32_t f;
+    std::memcpy(&f, &value, 4);
+    const uint32_t sign = (f >> 16) & 0x8000u;
+    const int32_t exp = static_cast<int32_t>((f >> 23) & 0xFFu) - 127 + 15;
+    const uint32_t man = f & 0x7FFFFFu;
+    if (exp <= 0) {
+      return static_cast<uint16_t>(sign);
+    }
+    if (exp >= 31) {
+      return static_cast<uint16_t>(sign | 0x7C00u);
+    }
+    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (man >> 13));
+  }
+
+  static void push_half(std::vector<uint8_t>& out, float value) {
+    const uint16_t h = to_half(value);
+    out.push_back(static_cast<uint8_t>(h & 0xFF));
+    out.push_back(static_cast<uint8_t>(h >> 8));
+  }
+
+  // block_q8_0: half d; int8 qs[32]
+  static void quantize_q8_0(const float* x, std::vector<uint8_t>& out) {
+    float amax = 0.f;
+    for (int i = 0; i < 32; ++i) {
+      amax = std::max(amax, std::fabs(x[i]));
+    }
+    const float d = amax / 127.0f;
+    const float id = d ? 1.0f / d : 0.0f;
+    push_half(out, d);
+    for (int i = 0; i < 32; ++i) {
+      const int v = static_cast<int>(std::lround(x[i] * id));
+      out.push_back(static_cast<uint8_t>(static_cast<int8_t>(std::clamp(v, -127, 127))));
+    }
+  }
+
+  // block_q4_0: half d; uint8 qs[16], low nibble = element j, high = element j+16
+  static void quantize_q4_0(const float* x, std::vector<uint8_t>& out) {
+    float amax = 0.f, amax_signed = 0.f;
+    for (int i = 0; i < 32; ++i) {
+      if (std::fabs(x[i]) > amax) {
+        amax = std::fabs(x[i]);
+        amax_signed = x[i];
+      }
+    }
+    const float d = amax_signed / -8.0f;
+    const float id = d ? 1.0f / d : 0.0f;
+    push_half(out, d);
+    for (int j = 0; j < 16; ++j) {
+      const int q0 = std::clamp(static_cast<int>(x[j] * id + 8.5f), 0, 15);
+      const int q1 = std::clamp(static_cast<int>(x[j + 16] * id + 8.5f), 0, 15);
+      out.push_back(static_cast<uint8_t>(q0 | (q1 << 4)));
+    }
+  }
 
   static void append_u32(std::string& s, uint32_t v) { s.append(reinterpret_cast<char*>(&v), 4); }
   static void append_u64(std::string& s, uint64_t v) { s.append(reinterpret_cast<char*>(&v), 8); }
@@ -205,7 +306,7 @@ inline std::vector<std::string> tiny_vocab() {
 }
 
 // Writes the fixture to `path`.  Returns the model geometry actually used.
-inline TinyModel build_tiny_gguf(const std::string& path) {
+inline TinyModel build_tiny_gguf(const std::string& path, Quant quant = Quant::F32) {
   TinyModel m;
   const auto vocab = tiny_vocab();
   m.n_vocab = static_cast<uint32_t>(vocab.size());
@@ -213,7 +314,7 @@ inline TinyModel build_tiny_gguf(const std::string& path) {
   GgufWriter w;
   w.kv_string("general.architecture", "llama");
   w.kv_string("general.name", "oracle-tiny-test");
-  w.kv_u32("general.file_type", 0);
+  w.kv_u32("general.file_type", quant == Quant::F32 ? 0u : (quant == Quant::Q8_0 ? 7u : 2u));
   w.kv_u32("llama.block_count", m.n_layers);
   w.kv_u32("llama.embedding_length", m.n_embd);
   w.kv_u32("llama.feed_forward_length", m.n_ff);
@@ -247,23 +348,24 @@ inline TinyModel build_tiny_gguf(const std::string& path) {
 
   const uint32_t q_dim = m.n_heads * m.head_dim;
   const uint32_t kv_dim = m.n_kv_heads * m.head_dim;
-  w.tensor_f32("token_embd.weight", {m.n_embd, m.n_vocab},
-               weights(static_cast<size_t>(m.n_embd) * m.n_vocab, 1));
+  w.tensor_quant("token_embd.weight", {m.n_embd, m.n_vocab},
+                 weights(static_cast<size_t>(m.n_embd) * m.n_vocab, 1), quant);
   for (uint32_t l = 0; l < m.n_layers; ++l) {
     const std::string p = "blk." + std::to_string(l) + ".";
     w.tensor_f32(p + "attn_norm.weight", {m.n_embd}, std::vector<float>(m.n_embd, 1.0f));
-    w.tensor_f32(p + "attn_q.weight", {m.n_embd, q_dim}, weights(m.n_embd * q_dim, 10 + l));
-    w.tensor_f32(p + "attn_k.weight", {m.n_embd, kv_dim}, weights(m.n_embd * kv_dim, 20 + l));
-    w.tensor_f32(p + "attn_v.weight", {m.n_embd, kv_dim}, weights(m.n_embd * kv_dim, 30 + l));
-    w.tensor_f32(p + "attn_output.weight", {q_dim, m.n_embd}, weights(q_dim * m.n_embd, 40 + l));
+    w.tensor_quant(p + "attn_q.weight", {m.n_embd, q_dim}, weights(m.n_embd * q_dim, 10 + l), quant);
+    w.tensor_quant(p + "attn_k.weight", {m.n_embd, kv_dim}, weights(m.n_embd * kv_dim, 20 + l), quant);
+    w.tensor_quant(p + "attn_v.weight", {m.n_embd, kv_dim}, weights(m.n_embd * kv_dim, 30 + l), quant);
+    w.tensor_quant(p + "attn_output.weight", {q_dim, m.n_embd}, weights(q_dim * m.n_embd, 40 + l),
+                   quant);
     w.tensor_f32(p + "ffn_norm.weight", {m.n_embd}, std::vector<float>(m.n_embd, 1.0f));
-    w.tensor_f32(p + "ffn_gate.weight", {m.n_embd, m.n_ff}, weights(m.n_embd * m.n_ff, 50 + l));
-    w.tensor_f32(p + "ffn_up.weight", {m.n_embd, m.n_ff}, weights(m.n_embd * m.n_ff, 60 + l));
-    w.tensor_f32(p + "ffn_down.weight", {m.n_ff, m.n_embd}, weights(m.n_ff * m.n_embd, 70 + l));
+    w.tensor_quant(p + "ffn_gate.weight", {m.n_embd, m.n_ff}, weights(m.n_embd * m.n_ff, 50 + l), quant);
+    w.tensor_quant(p + "ffn_up.weight", {m.n_embd, m.n_ff}, weights(m.n_embd * m.n_ff, 60 + l), quant);
+    w.tensor_quant(p + "ffn_down.weight", {m.n_ff, m.n_embd}, weights(m.n_ff * m.n_embd, 70 + l), quant);
   }
   w.tensor_f32("output_norm.weight", {m.n_embd}, std::vector<float>(m.n_embd, 1.0f));
-  w.tensor_f32("output.weight", {m.n_embd, m.n_vocab},
-               weights(static_cast<size_t>(m.n_embd) * m.n_vocab, 99));
+  w.tensor_quant("output.weight", {m.n_embd, m.n_vocab},
+                 weights(static_cast<size_t>(m.n_embd) * m.n_vocab, 99), quant);
 
   if (!w.write(path)) {
     m.n_vocab = 0;

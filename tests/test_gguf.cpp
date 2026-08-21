@@ -200,6 +200,67 @@ int main() {
     CHECK(std::abs(repeat[i] - single[i]) < 1e-5f);
   }
 
+  // ---- the same model, quantised ----------------------------------------
+  // Exercises dequantise-inside-the-mat-vec on the real graph rather than on
+  // isolated blocks: the weights are quantised, the activations are not, and
+  // the answer has to stay close to the f32 run.
+  for (auto quant : {oracle_test::Quant::Q8_0, oracle_test::Quant::Q4_0}) {
+    const auto qpath =
+        (std::filesystem::temp_directory_path() /
+         (std::string("oracle-tiny-") + oracle_test::quant_name(quant) + ".gguf"))
+            .string();
+    const auto qm = oracle_test::build_tiny_gguf(qpath, quant);
+    CHECK(qm.n_vocab == m.n_vocab);
+
+    oracle::model::ModelInfo qinfo;
+    st = oracle::model::inspect_gguf(qpath, &qinfo);
+    if (!st) {
+      std::cerr << "inspect " << oracle_test::quant_name(quant) << ": " << st.message << "\n";
+      return 1;
+    }
+    CHECK(qinfo.dominant_type == oracle_test::quant_name(quant));
+    CHECK(qinfo.supported_for_inference);
+    CHECK(qinfo.bits_per_weight < 32.0);
+    CHECK(qinfo.weight_bytes_total < info.weight_bytes_total);
+
+    oracle::ModelMeta qmeta;
+    qmeta.path = qpath;
+    qmeta.act_dtype = oracle::DType::F32;
+    oracle::GgufRunner qrunner;
+    st = qrunner.load_layers(qmeta, {0, qm.n_layers}, qpath);
+    if (!st) {
+      std::cerr << "load " << oracle_test::quant_name(quant) << ": " << st.message << "\n";
+      return 1;
+    }
+
+    oracle::KvCache qkv;
+    CHECK(qkv.allocate(layout_for(qm, qm.n_layers, oracle::DType::F32)).ok());
+    oracle::Tensor qe, qh, ql;
+    CHECK(qrunner.embed(prompt, &qe).ok());
+    st = qrunner.forward(qe.payload, qkv, &qh);
+    if (!st) {
+      std::cerr << "forward " << oracle_test::quant_name(quant) << ": " << st.message << "\n";
+      return 1;
+    }
+    CHECK(qrunner.lm_head(qh.payload, &ql).ok());
+    const auto qlogits = logits_of(ql);
+    CHECK(qlogits.size() == single.size());
+
+    double worst = 0.0;
+    double scale = 1.0;
+    for (size_t i = 0; i < single.size(); ++i) {
+      CHECK(std::isfinite(qlogits[i]));
+      worst = std::max(worst, static_cast<double>(std::abs(single[i] - qlogits[i])));
+      scale = std::max(scale, static_cast<double>(std::abs(single[i])));
+    }
+    const double relative = worst / scale;
+    std::cout << oracle_test::quant_name(quant) << ": max relative logit error " << relative << "\n";
+    // Generous but meaningful: a wrong dequantiser or a mis-strided row reads
+    // as noise, which blows well past these bounds.
+    CHECK(relative < (quant == oracle_test::Quant::Q8_0 ? 0.05 : 0.60));
+    std::remove(qpath.c_str());
+  }
+
   std::remove(path.c_str());
   std::cout << "test_gguf ok next_token=" << next << "\n";
   return 0;

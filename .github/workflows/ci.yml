@@ -25,6 +25,12 @@ jobs:
       - name: Unit tests
         run: ctest --test-dir build --output-on-failure
 
+      # Compares the transformer against an independent NumPy implementation.
+      - name: Reference cross-check
+        run: |
+          python3 -m pip install --quiet numpy
+          scripts/verify_reference.sh
+
       # Boots a real two-node mesh over TCP and drives it through the HTTP API.
       - name: End-to-end
         run: scripts/e2e_test.sh

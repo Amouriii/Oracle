@@ -2,6 +2,7 @@
 // run it, including a suggested layer split across a set of RAM budgets.
 #include "oracle/model/gguf.hpp"
 #include "oracle/model/tokenizer.hpp"
+#include "oracle/runner/gguf_runner.hpp"
 
 #include <cstring>
 #include <iomanip>
@@ -26,10 +27,72 @@ std::string human(uint64_t bytes) {
 }
 
 void usage() {
-  std::cout << "oracle-model-info MODEL.gguf [--json] [--tensors] [--split GB,GB,...]\n"
-               "  --json      machine-readable output\n"
-               "  --tensors   list every tensor with its shape and quantisation\n"
-               "  --split     propose a layer assignment for the given per-node RAM budgets\n";
+  std::cout << "oracle-model-info MODEL.gguf [options]\n"
+               "  --json          machine-readable output\n"
+               "  --tensors       list every tensor with its shape and quantisation\n"
+               "  --split GB,..   propose a layer assignment for the given per-node RAM budgets\n"
+               "  --logits IDS    run the model over a comma-separated token id list and print\n"
+               "                  the resulting logits, one per line (for cross-checking against\n"
+               "                  an independent implementation)\n"
+               "  --encode TEXT   tokenise TEXT and print the ids\n";
+}
+
+// Runs the prompt through the whole model on this process and prints the
+// next-token logits.  Used by tests/reference_llama.py to compare Oracle's
+// forward pass against an independent NumPy implementation.
+int dump_logits(const std::string& path, const std::vector<int32_t>& tokens) {
+  oracle::ModelMeta meta;
+  meta.path = path;
+  meta.act_dtype = oracle::DType::F32;  // no f16 rounding between the stages
+  oracle::GgufRunner runner;
+  auto st = runner.load_layers(meta, {0, 0}, path);
+  if (!st) {
+    std::cerr << "load: " << st.message << "\n";
+    return 1;
+  }
+  const auto& info = runner.info();
+
+  oracle::KvLayout kv_layout;
+  kv_layout.n_local_layers = info.n_layers;
+  kv_layout.n_kv_heads = info.n_kv_heads;
+  kv_layout.max_seq = std::max<uint32_t>(info.context_length, static_cast<uint32_t>(tokens.size()) + 1);
+  kv_layout.head_dim = info.head_dim;
+  kv_layout.dtype = oracle::DType::F32;
+  kv_layout.bytes_k = static_cast<uint64_t>(kv_layout.n_local_layers) * kv_layout.n_kv_heads *
+                      kv_layout.head_dim * kv_layout.max_seq * 4;
+  kv_layout.bytes_v = kv_layout.bytes_k;
+  kv_layout.bytes_total = kv_layout.bytes_k + kv_layout.bytes_v;
+
+  oracle::KvCache kv;
+  st = kv.allocate(kv_layout);
+  if (!st) {
+    std::cerr << "kv: " << st.message << "\n";
+    return 1;
+  }
+
+  oracle::Tensor embedded, hidden, logits;
+  st = runner.embed(tokens, &embedded);
+  if (!st) {
+    std::cerr << "embed: " << st.message << "\n";
+    return 1;
+  }
+  st = runner.forward(embedded.payload, kv, &hidden);
+  if (!st) {
+    std::cerr << "forward: " << st.message << "\n";
+    return 1;
+  }
+  st = runner.lm_head(hidden.payload, &logits);
+  if (!st) {
+    std::cerr << "lm_head: " << st.message << "\n";
+    return 1;
+  }
+  const auto* v = reinterpret_cast<const float*>(logits.payload.data());
+  const size_t n = logits.payload.size() / 4;
+  std::cout << std::setprecision(9);
+  for (size_t i = 0; i < n; ++i) {
+    std::cout << v[i] << "\n";
+  }
+  return 0;
 }
 
 }  // namespace
@@ -38,6 +101,10 @@ int main(int argc, char** argv) {
   std::string path;
   bool json = false;
   bool tensors = false;
+  bool want_logits = false;
+  std::string encode_text;
+  bool want_encode = false;
+  std::vector<int32_t> logit_tokens;
   std::vector<double> budgets;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--json") == 0) {
@@ -55,6 +122,21 @@ int main(int argc, char** argv) {
           return 2;
         }
       }
+    } else if (std::strcmp(argv[i], "--logits") == 0 && i + 1 < argc) {
+      want_logits = true;
+      std::stringstream ss(argv[++i]);
+      std::string item;
+      while (std::getline(ss, item, ',')) {
+        try {
+          logit_tokens.push_back(static_cast<int32_t>(std::stol(item)));
+        } catch (...) {
+          std::cerr << "bad --logits token id: " << item << "\n";
+          return 2;
+        }
+      }
+    } else if (std::strcmp(argv[i], "--encode") == 0 && i + 1 < argc) {
+      want_encode = true;
+      encode_text = argv[++i];
     } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
       usage();
       return 0;
@@ -65,6 +147,14 @@ int main(int argc, char** argv) {
   if (path.empty()) {
     usage();
     return 2;
+  }
+
+  if (want_logits) {
+    if (logit_tokens.empty()) {
+      std::cerr << "--logits needs at least one token id\n";
+      return 2;
+    }
+    return dump_logits(path, logit_tokens);
   }
 
   oracle::model::GgufFile f;
@@ -78,6 +168,21 @@ int main(int argc, char** argv) {
   if (!st) {
     std::cerr << "error: " << st.message << "\n";
     return 1;
+  }
+
+  if (want_encode) {
+    oracle::model::Tokenizer tok;
+    auto ts = tok.load(f);
+    if (!ts) {
+      std::cerr << "tokenizer: " << ts.message << "\n";
+      return 1;
+    }
+    const auto ids = tok.encode(encode_text, tok.add_bos_default());
+    for (size_t i = 0; i < ids.size(); ++i) {
+      std::cout << (i ? "," : "") << ids[i];
+    }
+    std::cout << "\n";
+    return 0;
   }
 
   if (json) {

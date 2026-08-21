@@ -311,8 +311,25 @@ available; elsewhere it uses a portable threaded CPU backend. Options:
 | `scheduler` | Priority, queue shedding, timeouts, worker scoring, dead-stage refusal |
 | `shard_plan`, `pipeline_tiny` | Layer assignment against RAM budgets; end-to-end tiny pipeline |
 
+`test_gguf` also runs the same fixture quantised to Q8_0 and Q4_0 and checks the
+logits stay within the error those formats imply — which exercises
+dequantise-inside-the-mat-vec on the real graph, not just on isolated blocks.
+
 Tests use a `CHECK` macro rather than `assert`, so they keep checking in the
 default Release build.
+
+Two checks go beyond the unit suite:
+
+```bash
+scripts/verify_reference.sh   # engine vs. an independent NumPy implementation
+scripts/e2e_test.sh           # a real two-node mesh driven through the HTTP API
+```
+
+`tests/reference_llama.py` re-implements the forward pass in NumPy, with its own
+GGUF parser and no shared code with the engine. Comparing against it is what
+catches a sign error in RoPE, a wrong grouped-query head mapping or a transposed
+projection — mistakes the engine's self-comparison would reproduce identically
+on both sides. On the fixture the two agree to ~6e-07.
 
 ---
 
@@ -351,6 +368,11 @@ a POSIX shared-memory SPSC ring instead of the socket.
 - **The pipeline is linear.** There is no tensor parallelism within a layer, and
   no replica failover: if a stage's worker dies, requests are refused until it
   returns.
+- **Verified against a reference implementation and synthetic models, not yet
+  against a published one.** The forward pass matches the NumPy reference to
+  ~6e-07 and the dequantisers match hand-built blocks, but no benchmark numbers
+  from a real checkpoint are claimed here. `scripts/fetch_model.sh` pulls a
+  TinyLlama to try first.
 
 ## License
 
