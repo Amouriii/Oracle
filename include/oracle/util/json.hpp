@@ -353,26 +353,78 @@ inline ParseResult parse(std::string_view text) {
   return r;
 }
 
+// Escapes a string for a JSON document *and* guarantees the result is valid
+// UTF-8.
+//
+// A model's byte-fallback tokens are individual bytes, and a generation cut off
+// at max_tokens can end mid-character, so the text handed to us is not always
+// well-formed.  JSON strings must be valid UTF-8, and a client that stops
+// parsing at the first bad byte silently loses the rest of the response, so any
+// byte that is not part of a well-formed sequence becomes U+FFFD.
 inline std::string escape(std::string_view s) {
+  static constexpr std::string_view kReplacement = "\xEF\xBF\xBD";  // U+FFFD
   std::string o;
   o.reserve(s.size() + 8);
-  for (char c : s) {
-    switch (c) {
-      case '"': o += "\\\""; break;
-      case '\\': o += "\\\\"; break;
-      case '\n': o += "\\n"; break;
-      case '\r': o += "\\r"; break;
-      case '\t': o += "\\t"; break;
-      case '\b': o += "\\b"; break;
-      case '\f': o += "\\f"; break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-          o += buf;
-        } else {
-          o += c;
-        }
+  size_t i = 0;
+  while (i < s.size()) {
+    const auto c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) {
+      switch (c) {
+        case '"': o += "\\\""; break;
+        case '\\': o += "\\\\"; break;
+        case '\n': o += "\\n"; break;
+        case '\r': o += "\\r"; break;
+        case '\t': o += "\\t"; break;
+        case '\b': o += "\\b"; break;
+        case '\f': o += "\\f"; break;
+        default:
+          if (c < 0x20) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            o += buf;
+          } else {
+            o += static_cast<char>(c);
+          }
+      }
+      ++i;
+      continue;
+    }
+
+    size_t need = 0;
+    uint32_t cp = 0;
+    if ((c & 0xE0) == 0xC0) {
+      need = 2;
+      cp = c & 0x1Fu;
+    } else if ((c & 0xF0) == 0xE0) {
+      need = 3;
+      cp = c & 0x0Fu;
+    } else if ((c & 0xF8) == 0xF0) {
+      need = 4;
+      cp = c & 0x07u;
+    }
+    bool valid = need != 0 && i + need <= s.size();
+    for (size_t k = 1; valid && k < need; ++k) {
+      const auto cc = static_cast<unsigned char>(s[i + k]);
+      if ((cc & 0xC0) != 0x80) {
+        valid = false;
+        break;
+      }
+      cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    if (valid) {
+      // Reject overlong encodings, surrogates and anything past U+10FFFF.
+      const bool overlong = (need == 2 && cp < 0x80) || (need == 3 && cp < 0x800) ||
+                            (need == 4 && cp < 0x10000);
+      if (overlong || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        valid = false;
+      }
+    }
+    if (valid) {
+      o.append(s.substr(i, need));
+      i += need;
+    } else {
+      o.append(kReplacement);
+      ++i;
     }
   }
   return o;

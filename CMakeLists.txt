@@ -160,7 +160,7 @@ target_link_libraries(oracle-model-info PRIVATE oracle_runner)
 if(ORACLE_BUILD_TESTS)
   enable_testing()
   foreach(t ring_buffer protocol shard_plan pipeline_tiny transport_tcp gguf quant tokenizer
-            security scheduler)
+            security scheduler json)
     add_executable(test_${t} tests/test_${t}.cpp)
     target_include_directories(test_${t} PRIVATE tests)
     add_test(NAME ${t} COMMAND test_${t})
@@ -176,6 +176,7 @@ if(ORACLE_BUILD_TESTS)
   target_link_libraries(test_tokenizer PRIVATE oracle_model)
   target_link_libraries(test_security PRIVATE oracle_security)
   target_link_libraries(test_scheduler PRIVATE oracle_orch)
+  target_link_libraries(test_json PRIVATE oracle_tb3)
 endif()
 
 # ---------------------------------------------------------------- python ------

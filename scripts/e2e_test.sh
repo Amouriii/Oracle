@@ -5,6 +5,10 @@
 # Everything runs on localhost, so this needs no model download and no second
 # machine; the code paths are the same ones a Thunderbolt mesh uses.
 set -euo pipefail
+# Byte-wise matching: the assertions below grep JSON that carries model output,
+# and in a UTF-8 locale BSD grep stops matching a line at the first byte that is
+# not valid UTF-8 -- so a pattern after such a byte silently never matches.
+export LC_ALL=C
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${ROOT}/build"
 WORK="$(mktemp -d)"
@@ -164,6 +168,17 @@ OUT="$(api -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
   -d '{"messages":[{"role":"user","content":"hello world"}],"max_tokens":8,"temperature":0}')"
 echo "${OUT}" | grep -q '"object":"chat.completion"' || { echo "${OUT}"; fail "chat completion"; }
 echo "${OUT}" | grep -q '"completion_tokens":8' || { echo "${OUT}"; fail "wrong token count"; }
+# Whatever the model produced, the response has to be parseable JSON: a client
+# that stops at the first bad byte would otherwise lose the response silently.
+if command -v python3 >/dev/null 2>&1; then
+  printf '%s' "${OUT}" | python3 -c "
+import json, sys
+d = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+assert d['choices'][0]['message']['role'] == 'assistant'
+assert d['usage']['completion_tokens'] == 8
+" || fail "the completion was not valid, parseable JSON"
+  ok "response is valid UTF-8 JSON"
+fi
 ok "buffered chat completion (8 tokens through 2 stages)"
 
 STREAM="$(api -N -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
