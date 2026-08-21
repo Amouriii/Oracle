@@ -51,13 +51,16 @@ struct WorkerResources {
   double link_gbps{0.0};
 
   WorkerState state{WorkerState::Unknown};
+  // Heartbeats travel over UDP and the activation stream over TCP; a node can
+  // be answering one while the other is down, so liveness needs both.
+  bool link_up{true};
   uint32_t missed_heartbeats{0};
   uint64_t reconnects{0};
   std::chrono::steady_clock::time_point last_seen{};
   std::string last_error;
 
   [[nodiscard]] bool healthy() const noexcept {
-    return state == WorkerState::Ready || state == WorkerState::Busy;
+    return link_up && (state == WorkerState::Ready || state == WorkerState::Busy);
   }
   [[nodiscard]] bool accepting() const noexcept {
     return healthy() && active_requests < std::max(1u, max_concurrent);
@@ -95,6 +98,8 @@ class WorkerRegistry {
   void mark_dead(NodeId id, const std::string& reason);
   void mark_state(NodeId id, WorkerState state);
   void note_reconnect(NodeId id);
+  // Records whether the activation stream to this node is currently open.
+  void set_link_up(NodeId id, bool up);
   void add_active(NodeId id, int delta);
   void set_link(NodeId id, double latency_ms, double gbps);
 

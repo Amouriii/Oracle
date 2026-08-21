@@ -172,6 +172,47 @@ Status parse_request(const std::string& body, bool chat, ParsedChat* out) {
   return Status::OK();
 }
 
+// A multi-byte character can straddle two tokens, and half a UTF-8 sequence
+// makes an SSE chunk invalid JSON for strict clients.  This holds back an
+// incomplete trailing sequence until the remaining bytes arrive.
+class Utf8Gate {
+ public:
+  std::string push(std::string_view piece) {
+    buf_ += piece;
+    const size_t cut = complete_prefix(buf_);
+    std::string out = buf_.substr(0, cut);
+    buf_.erase(0, cut);
+    return out;
+  }
+  std::string flush() {
+    std::string out;
+    out.swap(buf_);
+    return out;  // whatever is left is emitted as-is at end of stream
+  }
+
+ private:
+  static size_t sequence_length(unsigned char c) {
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;  // stray continuation byte: pass it through rather than stalling
+  }
+  static size_t complete_prefix(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+      const size_t n = sequence_length(static_cast<unsigned char>(s[i]));
+      if (i + n > s.size()) {
+        break;
+      }
+      i += n;
+    }
+    return i;
+  }
+
+  std::string buf_;
+};
+
 std::string chunk_json(const std::string& id, const std::string& model, const std::string& delta,
                        const char* finish_reason, bool first) {
   std::ostringstream os;
@@ -346,6 +387,7 @@ Status run_openai_server(PipelineOrchestrator& orch, uint16_t port) {
             bool first = true;
             uint32_t emitted = 0;
             bool aborted = false;
+            Utf8Gate utf8;
             auto write = [&](const std::string& payload) {
               const std::string frame = "data: " + payload + "\n\n";
               if (!sink.write(frame.data(), frame.size())) {
@@ -359,8 +401,9 @@ Status run_openai_server(PipelineOrchestrator& orch, uint16_t port) {
                   if (aborted) {
                     return;
                   }
-                  if (!t.text.empty() || first) {
-                    write(chunk_json(completion_id, model_name, t.text, nullptr, first));
+                  const std::string piece = utf8.push(t.text);
+                  if (!piece.empty() || first) {
+                    write(chunk_json(completion_id, model_name, piece, nullptr, first));
                     first = false;
                   }
                   ++emitted;
@@ -373,7 +416,7 @@ Status run_openai_server(PipelineOrchestrator& orch, uint16_t port) {
               write(os.str());
               shared_admission->fail(st.message);
             } else {
-              write(chunk_json(completion_id, model_name, {},
+              write(chunk_json(completion_id, model_name, utf8.flush(),
                                result.finish_reason.empty() ? "stop" : result.finish_reason.c_str(),
                                first));
               shared_admission->complete(result.completion_tokens);

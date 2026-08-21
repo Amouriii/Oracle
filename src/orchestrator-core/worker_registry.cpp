@@ -118,6 +118,7 @@ std::string WorkerResources::to_json() const {
      << ",\"link\":{\"latency_ms\":" << link_latency_ms << ",\"gbps\":" << link_gbps << "}"
      << ",\"heartbeat\":{\"age_ms\":" << age_ms << ",\"missed\":" << missed_heartbeats
      << ",\"reconnects\":" << reconnects << "}"
+     << ",\"link_up\":" << (link_up ? "true" : "false")
      << ",\"accepting\":" << (accepting() ? "true" : "false");
   if (!last_error.empty()) {
     os << ",\"last_error\":\"" << json_escape(last_error) << "\"";
@@ -154,9 +155,11 @@ void WorkerRegistry::seed(const ClusterConfig& cfg, NodeId self) {
     }
     if (n.id == self) {
       w.state = WorkerState::Ready;
+      w.link_up = true;
       w.last_seen = std::chrono::steady_clock::now();
     } else if (w.state == WorkerState::Unknown) {
       w.state = WorkerState::Joining;
+      w.link_up = false;  // nothing is connected until the handshake completes
     }
   }
 }
@@ -175,11 +178,14 @@ void WorkerRegistry::note_heartbeat(NodeId id, std::string_view payload) {
   w.id = id;
   w.last_seen = std::chrono::steady_clock::now();
   w.missed_heartbeats = 0;
-  if (w.state == WorkerState::Dead || w.state == WorkerState::Unknown ||
-      w.state == WorkerState::Joining) {
+  // A heartbeat proves the process is alive, so it clears Degraded and Dead
+  // alike -- a node that missed a beat and then came back must not stay
+  // Degraded forever.  It says nothing about the activation stream, though:
+  // `link_up` is owned by the transport reconciliation loop.
+  if (w.state != WorkerState::Busy) {
     w.state = WorkerState::Ready;
-    dead_since_.erase(id);
   }
+  dead_since_.erase(id);
   if (payload.empty()) {
     return;
   }
@@ -221,6 +227,7 @@ void WorkerRegistry::note_join(NodeId id, const std::string& host, const std::st
     w.layers = layers;
   }
   w.state = WorkerState::Ready;
+  w.link_up = true;
   w.missed_heartbeats = 0;
   w.last_seen = std::chrono::steady_clock::now();
   w.last_error.clear();
@@ -232,6 +239,7 @@ void WorkerRegistry::mark_dead(NodeId id, const std::string& reason) {
   auto& w = workers_[id];
   w.id = id;
   w.state = WorkerState::Dead;
+  w.link_up = false;
   w.last_error = reason;
   w.active_requests = 0;
   dead_since_[id] = std::chrono::steady_clock::now();
@@ -253,9 +261,28 @@ void WorkerRegistry::note_reconnect(NodeId id) {
   w.id = id;
   ++w.reconnects;
   w.state = WorkerState::Ready;
+  w.link_up = true;
   w.missed_heartbeats = 0;
   w.last_seen = std::chrono::steady_clock::now();
   dead_since_.erase(id);
+}
+
+void WorkerRegistry::set_link_up(NodeId id, bool up) {
+  std::lock_guard<std::mutex> g(mu_);
+  auto& w = workers_[id];
+  w.id = id;
+  if (w.link_up == up) {
+    return;
+  }
+  w.link_up = up;
+  if (!up) {
+    w.active_requests = 0;
+    if (w.last_error.empty()) {
+      w.last_error = "activation link is down";
+    }
+  } else {
+    w.last_error.clear();
+  }
 }
 
 void WorkerRegistry::add_active(NodeId id, int delta) {

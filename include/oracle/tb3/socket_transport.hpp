@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -145,6 +146,14 @@ class TB3SocketTransport {
     uint16_t port{0};
     std::mutex send_mu;
     std::mutex recv_mu;
+    // Handshake acks are deposited here rather than returned to whichever
+    // thread happened to be reading, so a reconnect cannot lose its ack to the
+    // router loop that is already draining this connection.
+    std::mutex ack_mu;
+    std::condition_variable ack_cv;
+    std::atomic<bool> ack_waiting{false};
+    bool ack_ready{false};
+    Tensor ack;
     std::atomic<uint64_t> bytes_sent{0};
     std::atomic<uint64_t> bytes_recv{0};
     std::atomic<uint64_t> frames_sent{0};

@@ -232,7 +232,8 @@ function renderNodes(d) {
     return `<tr>
       <td>${w.id}</td><td>${esc(w.host)}</td><td>${esc(w.role)}</td>
       <td>${w.layers.start}–${w.layers.end - 1} <span class="sub">(${w.layers.count})</span></td>
-      <td><span class="dot ${stateClass(w.state)}"></span>${esc(w.state)}</td>
+      <td><span class="dot ${w.link_up === false ? "bad" : stateClass(w.state)}"></span>${esc(w.state)}${
+        w.link_up === false ? ' <span class="sub">link down</span>' : ""}</td>
       <td>${bar(cpu)}<span class="sub">${(w.cpu.load * 100).toFixed(0)}% of ${w.cpu.cores}c</span></td>
       <td>${bar(ramUsed)}<span class="sub">${bytes(w.ram.free)} free</span></td>
       <td>${gpu}</td>
@@ -282,7 +283,10 @@ function renderSecurity(d) {
 function render(d) {
   const c = d.cluster || {};
   const workers = d.workers || [];
-  const alive = workers.filter((w) => w.state === "ready" || w.state === "busy").length;
+  // Mirrors the server's own definition of healthy: a live process *and* an
+  // open activation link.
+  const alive = workers.filter(
+    (w) => w.link_up !== false && (w.state === "ready" || w.state === "busy")).length;
   const stats = (d.scheduler || {}).stats || {};
   const net = d.network || {};
 

@@ -115,6 +115,29 @@ void check_registry() {
   reg.note_heartbeat(dead.front(), "");
   CHECK(reg.healthy(dead.front()));
   CHECK(reg.to_json().find("\"id\":0") != std::string::npos);
+
+  // A node that misses a beat and then comes back must return to Ready rather
+  // than staying Degraded forever.
+  reg.upsert(make_worker(7, 48, 56));
+  reg.mark_state(7, WorkerState::Degraded);
+  CHECK(!reg.healthy(7));
+  reg.note_heartbeat(7, "");
+  CHECK(reg.healthy(7));
+  CHECK(reg.get(7)->state == WorkerState::Ready);
+
+  // Heartbeats travel over UDP and activations over TCP.  A node answering
+  // heartbeats while its activation link is down must NOT count as healthy --
+  // otherwise a restarted worker looks alive and requests are dispatched into a
+  // connection that no longer exists.
+  reg.upsert(make_worker(6, 40, 48));
+  CHECK(reg.healthy(6));
+  reg.set_link_up(6, false);
+  reg.note_heartbeat(6, "");
+  CHECK(!reg.healthy(6));
+  CHECK(!reg.best_for_stage({40, 48}, need).has_value());
+  reg.set_link_up(6, true);
+  CHECK(reg.healthy(6));
+  CHECK(reg.best_for_stage({40, 48}, need).has_value());
 }
 
 void check_admission_order_and_limits() {

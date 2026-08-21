@@ -1,0 +1,13 @@
+# Oracle API keys.  Copy to configs/api_keys and fill in real digests.
+#
+# Format:  <id> <sha256-of-secret> [admin] [disabled] [rpm=N] [max_tokens=N] [max_concurrent=N]
+#
+# Generate a secret:
+#     ./build/oracle-engine-master --generate-key
+# Hash it (the server only ever stores the digest):
+#     printf '%s' "$SECRET" | sha256sum
+#
+# The example below is the digest of the literal string "sk-oracle-example-key-do-not-use".
+# Replace it before exposing Oracle to anything.
+
+example b58db4b7294ebd5cefb5729c2b2e2497fc35b4973f068c50848b6e8d459a16fc admin rpm=600

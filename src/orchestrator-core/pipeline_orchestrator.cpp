@@ -75,16 +75,21 @@ bool PipelineOrchestrator::is_master() const {
   return me && me->role == "master";
 }
 
-const model::Tokenizer* PipelineOrchestrator::tokenizer() const {
+const GgufRunner* PipelineOrchestrator::gguf_backend() const {
   if (const auto* g = dynamic_cast<const GgufRunner*>(runner_.get())) {
-    return &g->tokenizer();
+    return g;
   }
+  // --runner llamacpp wraps the GGUF runner; unwrap so model facts and the
+  // tokeniser are reported the same way either way.
   if (const auto* l = dynamic_cast<const LlamaCppRunner*>(runner_.get())) {
-    if (const auto* g = dynamic_cast<const GgufRunner*>(l->backend())) {
-      return &g->tokenizer();
-    }
+    return dynamic_cast<const GgufRunner*>(l->backend());
   }
   return nullptr;
+}
+
+const model::Tokenizer* PipelineOrchestrator::tokenizer() const {
+  const auto* g = gguf_backend();
+  return g ? &g->tokenizer() : nullptr;
 }
 
 uint64_t PipelineOrchestrator::uptime_seconds() const {
@@ -182,6 +187,7 @@ Status PipelineOrchestrator::init(ClusterConfig cfg, std::unique_ptr<NodeRunner>
   }
   publish_local_status();
   running_.store(true);
+  reliability_ = std::thread([this] { reliability_loop(); });
   return Status::OK();
 }
 
@@ -298,9 +304,6 @@ Status PipelineOrchestrator::start_heartbeat() {
     return st;
   }
   publish_local_status();
-  if (!reliability_.joinable()) {
-    reliability_ = std::thread([this] { reliability_loop(); });
-  }
   return Status::OK();
 }
 
@@ -315,7 +318,7 @@ void PipelineOrchestrator::publish_local_status() {
     std::lock_guard<std::mutex> g(kv_mu_);
     w.active_requests = static_cast<uint32_t>(kv_.size());
   }
-  if (const auto* g = dynamic_cast<const GgufRunner*>(runner_.get())) {
+  if (const auto* g = gguf_backend()) {
     w.resident_weight_bytes = g->resident_weight_bytes();
   }
   const auto stats = scheduler_.stats();
@@ -384,6 +387,7 @@ Status PipelineOrchestrator::connect_peers() {
         return Status::fail(st.code, "registering with node " + std::to_string(n.id) + ": " + st.message);
       }
       registry_.note_join(n.id, n.host, {}, n.layers);
+      registry_.set_link_up(n.id, true);
     }
     if (!router_.joinable()) {
       router_ = std::thread([this] { router_loop(); });
@@ -438,6 +442,13 @@ void PipelineOrchestrator::router_loop() {
     auto st = tx_.recv_any(&from, &t, 200);
     if (!st) {
       if (st.code == Errc::disconnected) {
+        // Close the socket rather than holding a dead fd: `connected()` is what
+        // the reconnect loop consults, so a stale entry would stop it re-dialling.
+        tx_.disconnect(from);
+        registry_.set_link_up(from, false);
+        security_.audit().warn("worker", "node-" + std::to_string(from),
+                               "activation link closed by the peer");
+      } else if (st.code == Errc::not_found) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       }
       continue;
@@ -481,31 +492,59 @@ void PipelineOrchestrator::reliability_loop() {
                               "marked dead after missing heartbeats");
       tx_.disconnect(id);
     }
-    if (!is_master()) {
+    if (is_master()) {
+      reconcile_links();
+    }
+  }
+}
+
+void PipelineOrchestrator::reconcile_links() {
+  // A node can answer heartbeats over UDP while its TCP activation stream is
+  // gone -- a restarted worker looks exactly like this.  The authority on
+  // whether a peer is usable is therefore the transport, not the heartbeat, so
+  // reconnection is driven by the link state and the registry is told about it.
+  const auto now = std::chrono::steady_clock::now();
+  const auto backoff = std::chrono::milliseconds(1000);
+  for (const auto& n : cfg_.nodes) {
+    if (n.id == self_) {
       continue;
     }
-    for (NodeId id : registry_.due_for_reconnect()) {
-      const auto* n = cfg_.find(id);
-      if (!n || id == self_) {
-        continue;
-      }
-      auto st = tx_.ensure_connected(id, n->host, n->transport_port, 500);
-      if (!st) {
-        continue;
-      }
-      Handshake hello;
-      hello.node_id = self_;
-      hello.role = "master";
-      hello.runner = runner_ ? runner_->name() : "none";
-      const auto* me = cfg_.find(self_);
-      hello.layer_start = me ? me->layers.start : 0;
-      hello.layer_end = me ? me->layers.end : 0;
-      hello.nonce = security_.new_nonce();
-      hello.signature = security_.sign(self_, hello.nonce);
-      if (tx_.register_with(id, hello)) {
-        registry_.note_reconnect(id);
-        security_.audit().info("worker", "node-" + std::to_string(id), "reconnected");
-      }
+    const bool up = tx_.connected(n.id);
+    registry_.set_link_up(n.id, up);
+    if (up) {
+      last_dial_.erase(n.id);
+      continue;
+    }
+    auto& last = last_dial_[n.id];
+    if (last.time_since_epoch().count() != 0 && now - last < backoff) {
+      continue;
+    }
+    last = now;
+
+    auto st = tx_.ensure_connected(n.id, n.host, n.transport_port, 500);
+    if (!st) {
+      security_.audit().info("worker", "node-" + std::to_string(n.id),
+                             "reconnect attempt failed: " + st.message);
+      continue;
+    }
+    Handshake hello;
+    hello.node_id = self_;
+    hello.role = "master";
+    hello.runner = runner_ ? runner_->name() : "none";
+    const auto* me = cfg_.find(self_);
+    hello.layer_start = me ? me->layers.start : 0;
+    hello.layer_end = me ? me->layers.end : 0;
+    hello.nonce = security_.new_nonce();
+    hello.signature = security_.sign(self_, hello.nonce);
+    auto reg = tx_.register_with(n.id, hello);
+    if (reg) {
+      registry_.note_reconnect(n.id);
+      registry_.set_link_up(n.id, true);
+      security_.audit().info("worker", "node-" + std::to_string(n.id), "activation link re-established");
+    } else {
+      security_.audit().warn("worker", "node-" + std::to_string(n.id),
+                             "re-registration failed: " + reg.message);
+      tx_.disconnect(n.id);
     }
   }
 }
@@ -909,13 +948,36 @@ Status PipelineOrchestrator::run_worker_loop() {
     Tensor in;
     auto st = tx_.recv_any(&from, &in, 250);
     if (!st) {
-      if (st.code == Errc::timeout || st.code == Errc::not_found) {
+      if (st.code == Errc::timeout) {
+        continue;
+      }
+      if (st.code == Errc::not_found) {
+        // No peers at all: the master is gone or has not arrived yet.  Waiting
+        // for a registration here is what lets a master restart without this
+        // node having to restart too.
+        Handshake peer;
+        if (tx_.accept_registration(250, &peer)) {
+          registry_.note_join(peer.node_id, {}, peer.runner, {peer.layer_start, peer.layer_end});
+          security_.audit().info("worker", "node-" + std::to_string(peer.node_id),
+                                 "registered with this node");
+        }
         continue;
       }
       if (st.code == Errc::disconnected) {
-        security_.audit().warn("worker", "node-" + std::to_string(from), "peer disconnected");
-        tx_.disconnect(from);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Either a peer went away, or we have no peers at all because the
+        // master restarted.  Drop the stale connection and go back to waiting
+        // for a registration, which is how this node rejoins without a restart.
+        if (from != 0 || tx_.connected(from)) {
+          security_.audit().warn("worker", "node-" + std::to_string(from), "peer disconnected");
+          tx_.disconnect(from);
+        }
+        Handshake peer;
+        auto acc = tx_.accept_registration(500, &peer);
+        if (acc) {
+          registry_.note_join(peer.node_id, {}, peer.runner, {peer.layer_start, peer.layer_end});
+          security_.audit().info("worker", "node-" + std::to_string(peer.node_id),
+                                 "re-registered with this node");
+        }
         continue;
       }
       security_.audit().warn("worker", "node-" + std::to_string(from), st.message);
@@ -1064,7 +1126,7 @@ std::string PipelineOrchestrator::models_json() const {
      << ",\"n_kv_heads\":" << cfg_.model.n_kv_heads << ",\"n_vocab\":" << cfg_.model.n_vocab
      << ",\"context_length\":" << cfg_.model.max_seq
      << ",\"weight_bytes\":" << cfg_.model.total_weight_bytes;
-  if (const auto* g = dynamic_cast<const GgufRunner*>(runner_.get())) {
+  if (const auto* g = gguf_backend()) {
     os << ",\"quantization\":\"" << json_escape(g->info().quantization) << "\""
        << ",\"architecture\":\"" << json_escape(g->info().architecture) << "\""
        << ",\"parameters\":" << g->info().param_count;
@@ -1089,11 +1151,12 @@ std::string PipelineOrchestrator::cluster_json(bool include_security) const {
      << ",\"context_length\":" << cfg_.model.max_seq
      << ",\"weight_bytes\":" << cfg_.model.total_weight_bytes
      << ",\"bytes_per_layer\":" << cfg_.model.bytes_per_layer;
-  if (const auto* g = dynamic_cast<const GgufRunner*>(runner_.get())) {
+  if (const auto* g = gguf_backend()) {
     os << ",\"quantization\":\"" << json_escape(g->info().quantization) << "\""
        << ",\"architecture\":\"" << json_escape(g->info().architecture) << "\""
        << ",\"parameters\":" << g->info().param_count << ",\"bits_per_weight\":"
-       << g->info().bits_per_weight;
+       << g->info().bits_per_weight
+       << ",\"resident_bytes\":" << g->resident_weight_bytes();
   }
   os << ",\"runner\":\"" << (runner_ ? runner_->name() : "none") << "\""
      << ",\"compute_backend\":\"" << compute::backend_name() << "\""

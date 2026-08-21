@@ -16,3 +16,9 @@ CMakeUserPresets.json
 .idea/
 .vscode/
 third_party/pybind11/
+
+# Operator-supplied secrets and runtime artefacts
+configs/api_keys
+configs/models.sha256
+oracle-security.log
+models/

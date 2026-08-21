@@ -1,0 +1,50 @@
+# Cluster layout used by docker-compose.yml.  Hosts are Compose service names,
+# which the bridge network resolves for each container.
+
+[cluster]
+name = "oracle-compose"
+http_port = 8000
+transport_port = 9200
+heartbeat_port = 9100
+heartbeat_interval_ms = 200
+heartbeat_misses = 5
+max_sequences = 8
+
+[model]
+path = "/models/model.gguf"
+max_seq = 4096
+act_dtype = "f16"
+
+[server]
+max_concurrent = 4
+max_queue_depth = 64
+queue_timeout_ms = 30000
+request_timeout_ms = 300000
+
+[security]
+require_api_key = true
+api_key_env = "ORACLE_API_KEYS"
+cluster_secret_env = "ORACLE_CLUSTER_SECRET"
+require_worker_auth = true
+requests_per_minute = 120
+burst = 20
+max_concurrent_requests = 16
+max_concurrent_per_key = 4
+
+[[nodes]]
+id = 0
+role = "master"
+host = "oracle-master"
+ram_budget_gb = 8.0
+
+[[nodes]]
+id = 1
+role = "worker"
+host = "oracle-worker1"
+ram_budget_gb = 8.0
+
+[[nodes]]
+id = 2
+role = "worker"
+host = "oracle-worker2"
+ram_budget_gb = 8.0

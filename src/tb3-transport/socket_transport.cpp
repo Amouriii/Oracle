@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -39,6 +40,25 @@ bool wait_fd(int fd, short events, int timeout_ms) {
   pfd.events = events;
   const int r = poll(&pfd, 1, timeout_ms);
   return r > 0 && (pfd.revents & events) != 0;
+}
+
+// Accepts a dotted quad or a hostname.  Compose service names and mDNS names
+// ("studio.local") are both normal ways to address a node, so the transport
+// cannot assume a literal address.
+bool resolve_host(const std::string& host, in_addr* out) {
+  if (inet_pton(AF_INET, host.c_str(), out) == 1) {
+    return true;
+  }
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* res = nullptr;
+  if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) {
+    return false;
+  }
+  *out = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
+  freeaddrinfo(res);
+  return true;
 }
 
 double ms_since(std::chrono::steady_clock::time_point t0) {
@@ -241,7 +261,7 @@ Status TB3SocketTransport::listen(const TransportOptions& opt) {
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(opt.port);
-  if (inet_pton(AF_INET, opt.bind_host.c_str(), &addr.sin_addr) != 1) {
+  if (!resolve_host(opt.bind_host, &addr.sin_addr)) {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
   }
   if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -276,9 +296,9 @@ Status TB3SocketTransport::connect(NodeId peer, const std::string& host, uint16_
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+  if (!resolve_host(host, &addr.sin_addr)) {
     ::close(fd);
-    return Status::fail(Errc::invalid_argument, "not a dotted-quad address: " + host);
+    return Status::fail(Errc::not_found, "cannot resolve host '" + host + "'");
   }
   if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     const auto st = io_err("connect");
@@ -418,15 +438,54 @@ Status TB3SocketTransport::register_with(NodeId peer, const Handshake& hello, in
   hdr.nbytes = blob.size();
   auto payload = std::span<const std::byte>(reinterpret_cast<const std::byte*>(blob.data()), blob.size());
   hdr.checksum = crc32(payload);
+
+  c->ack_waiting.store(true, std::memory_order_release);
+  struct ClearWaiting {
+    Conn* c;
+    ~ClearWaiting() {
+      c->ack_waiting.store(false, std::memory_order_release);
+      std::lock_guard<std::mutex> g(c->ack_mu);
+      c->ack_ready = false;
+    }
+  } clear_waiting{c.get()};
+
   auto st = send_tensor(peer, hdr, payload);
   if (!st) {
     return st;
   }
+  // Wait for the ack.  Another thread may already be reading this connection
+  // (the master's router loop), so either read it ourselves when the socket is
+  // free or let that reader deposit the ack for us.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   Tensor ack;
-  st = recv_tensor(peer, &ack, timeout_ms);
-  if (!st) {
-    return st;
+  for (;;) {
+    {
+      std::lock_guard<std::mutex> g(c->ack_mu);
+      if (c->ack_ready) {
+        ack = std::move(c->ack);
+        c->ack_ready = false;
+        break;
+      }
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return Status::fail(Errc::timeout,
+                          "node " + std::to_string(peer) + " did not acknowledge the handshake");
+    }
+    std::unique_lock<std::mutex> reader(c->recv_mu, std::try_to_lock);
+    if (reader.owns_lock()) {
+      Tensor t;
+      auto rs = recv_fd(*c, &t, 50);
+      if (!rs && rs.code == Errc::disconnected) {
+        return rs;
+      }
+      // A data frame arriving mid-handshake belongs to a request that has
+      // already given up on this node; there is nowhere to route it.
+    } else {
+      std::unique_lock<std::mutex> lk(c->ack_mu);
+      c->ack_cv.wait_for(lk, std::chrono::milliseconds(50), [&] { return c->ack_ready; });
+    }
   }
+
   const std::string body(reinterpret_cast<const char*>(ack.payload.data()), ack.payload.size());
   if ((ack.header.flags & kFlagAck) == 0 || body != kAckOk) {
     return Status::fail(Errc::invalid_argument,
@@ -576,6 +635,16 @@ Status TB3SocketTransport::recv_fd(Conn& c, Tensor* out, int timeout_ms) {
   c.bytes_recv.fetch_add(sizeof(TensorHeader) + out->payload.size(), std::memory_order_relaxed);
   c.frames_recv.fetch_add(1, std::memory_order_relaxed);
   c.last_recv_ms.store(ms_since(t0), std::memory_order_relaxed);
+
+  if ((out->header.flags & kFlagAck) != 0 && c.ack_waiting.load(std::memory_order_acquire)) {
+    // A registration is in progress on this connection: hand the ack to it and
+    // tell this caller there was nothing for them.
+    std::lock_guard<std::mutex> g(c.ack_mu);
+    c.ack = std::move(*out);
+    c.ack_ready = true;
+    c.ack_cv.notify_all();
+    return Status::fail(Errc::not_found, "frame consumed as a handshake ack");
+  }
   return Status::OK();
 }
 
@@ -614,7 +683,9 @@ Status TB3SocketTransport::recv_any(NodeId* from, Tensor* out, int timeout_ms) {
     }
   }
   if (live.empty()) {
-    return Status::fail(Errc::disconnected, "no connected peers");
+    // Distinct from a peer closing on us: there is nothing to read from, but
+    // no connection was just lost either.
+    return Status::fail(Errc::not_found, "no connected peers");
   }
   std::vector<pollfd> pfds;
   pfds.reserve(live.size());
@@ -629,11 +700,16 @@ Status TB3SocketTransport::recv_any(NodeId* from, Tensor* out, int timeout_ms) {
     return Status::fail(Errc::timeout, "no frame arrived");
   }
   for (size_t i = 0; i < pfds.size(); ++i) {
-    if ((pfds[i].revents & POLLIN) == 0) {
+    if ((pfds[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) == 0) {
       continue;
     }
     if (from) {
       *from = live[i]->peer;
+    }
+    if ((pfds[i].revents & POLLIN) == 0) {
+      // Hung up with nothing left to read: report it rather than spinning on a
+      // socket that will never become readable.
+      return Status::fail(Errc::disconnected, "peer closed the connection");
     }
     std::lock_guard<std::mutex> g(live[i]->recv_mu);
     return recv_fd(*live[i], out, timeout_ms);
@@ -753,7 +829,7 @@ void TB3SocketTransport::hb_loop() {
       sockaddr_in a{};
       a.sin_family = AF_INET;
       a.sin_port = htons(port);
-      if (inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) {
+      if (!resolve_host(host, &a.sin_addr)) {
         continue;
       }
       sendto(hb_fd_, buf.data(), buf.size(), 0, reinterpret_cast<sockaddr*>(&a), sizeof(a));

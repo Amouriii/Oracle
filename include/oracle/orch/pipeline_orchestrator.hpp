@@ -129,6 +129,8 @@ class PipelineOrchestrator {
   [[nodiscard]] bool single_node() const noexcept { return cfg_.nodes.size() <= 1; }
   [[nodiscard]] const std::string& model_name() const noexcept { return model_name_; }
   [[nodiscard]] const model::Tokenizer* tokenizer() const;
+  // The GGUF backend, whichever runner wrapper is in front of it.
+  [[nodiscard]] const class GgufRunner* gguf_backend() const;
   [[nodiscard]] uint64_t uptime_seconds() const;
 
   // ---- HTTP payloads (also used by the dashboard) ------------------------
@@ -155,6 +157,8 @@ class PipelineOrchestrator {
   Status run_stage(Tensor in, uint64_t seq_id, KvCache& kv, Tensor* logits, int timeout_ms);
   void router_loop();
   void reliability_loop();
+  // Master side: bring every configured peer's activation link back up.
+  void reconcile_links();
   void release_sequence(uint64_t seq_id);
   KvCache* kv_for(uint64_t seq_id, bool reset);
   void drop_sequence(uint64_t seq_id);
@@ -190,6 +194,7 @@ class PipelineOrchestrator {
   std::mutex chan_mu_;
   std::unordered_map<uint64_t, std::shared_ptr<SeqChannel>> channels_;
 
+  std::unordered_map<NodeId, std::chrono::steady_clock::time_point> last_dial_;
   std::thread router_;
   std::thread reliability_;
   std::atomic<bool> running_{false};

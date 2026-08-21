@@ -1,27 +1,67 @@
+# Oracle cluster: three machines on a Thunderbolt bridge, one model split
+# across their RAM.  Every value here can be overridden on the command line.
+
 [cluster]
-name = "tb3-mesh"
-heartbeat_port = 9100
-http_port = 8000
-transport_port = 9200
-mtu = 9000
-heartbeat_misses = 5
+name = "oracle-tb3"
+http_port = 8000            # OpenAI API + dashboard, master only
+transport_port = 9200       # activation stream between nodes (TCP)
+heartbeat_port = 9100       # liveness + load datagrams (UDP)
+mtu = 9000                  # jumbo frames on the TB3 bridge
 heartbeat_interval_ms = 200
+heartbeat_misses = 5        # 5 x 200 ms = a node is declared dead after 1s
+max_sequences = 8           # KV caches held per node before the oldest is evicted
 
 [model]
-name = "llama-70b-q4"
+# Point this at a GGUF file that exists on every node at the same path.
+# Leave it empty to run the identity runner, which exercises transport and
+# orchestration without a model.
 path = ""
+name = "llama-70b-q4"
+# The fields below are read from the GGUF when a path is set; they only matter
+# as a fallback for the identity runner and for capacity planning.
 n_layers = 80
 hidden_dim = 8192
 n_heads = 64
 n_kv_heads = 8
 head_dim = 128
 n_vocab = 32000
-max_seq = 4096
-dtype = "q4"
-act_dtype = "f16"
-# ~40 GiB Q4 / 80 layers
+max_seq = 4096              # caps the context, and therefore the KV cache
+act_dtype = "f16"           # activation dtype on the wire; halves link traffic
 bytes_per_layer = 536870912
 
+[server]
+max_concurrent = 4          # requests executing at once
+max_queue_depth = 128       # waiting requests before new ones are shed
+queue_timeout_ms = 30000    # how long a request waits for a slot
+request_timeout_ms = 300000
+compute_threads = 0         # 0 = one per hardware thread
+
+[security]
+require_api_key = true
+# One key per line: "<id> <sha256-of-secret> [admin] [rpm=N] [max_tokens=N]".
+# Generate a key with:  oracle-engine-master --generate-key
+api_key_file = "configs/api_keys"
+api_key_env = "ORACLE_API_KEYS"
+# Shared secret every node signs its handshake with.  Prefer the environment
+# variable so the secret never lands in a config file under version control.
+cluster_secret_env = "ORACLE_CLUSTER_SECRET"
+require_worker_auth = true
+max_request_bytes = 1048576
+max_prompt_chars = 131072
+max_completion_tokens = 2048
+max_messages = 256
+max_concurrent_requests = 32
+max_concurrent_per_key = 8
+requests_per_minute = 120
+burst = 20
+abuse_threshold = 50        # rejections in a minute before a source is parked
+ban_seconds = 300
+audit_log = "oracle-security.log"
+# model_manifest = "configs/models.sha256"
+verify_model_integrity = false
+
+# The first node is the master: it owns the embedding, the first layers, the
+# HTTP surface and the scheduler.  The last node owns the output head.
 [[nodes]]
 id = 0
 role = "master"

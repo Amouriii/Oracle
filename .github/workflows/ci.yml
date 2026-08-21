@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    name: build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      # Boots a real two-node mesh over TCP and drives it through the HTTP API.
+      - name: End-to-end
+        run: scripts/e2e_test.sh
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image build runs the test suite inside the builder stage.
+      - run: docker build -t oracle:ci .
+      - name: Smoke-test the image
+        run: |
+          docker run --rm -d --name oracle-ci -p 8000:8000 oracle:ci \
+            oracle-engine-master --config /etc/oracle/single.toml --single --no-auth
+          for _ in $(seq 1 60); do
+            sleep 1
+            curl -fsS http://127.0.0.1:8000/health && break
+          done
+          curl -fsS http://127.0.0.1:8000/health
+          curl -fsS http://127.0.0.1:8000/v1/models
+          docker rm -f oracle-ci
