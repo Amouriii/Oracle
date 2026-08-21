@@ -1,5 +1,4 @@
-#include "Accelerate/Accelerate.h"
-
+#include "oracle/compute/blas.hpp"
 #include "oracle/runner/node_runner.hpp"
 
 #include <algorithm>
@@ -115,8 +114,8 @@ Status AccelerateRunner::gemm_f32(uint32_t m, uint32_t n, uint32_t k, const floa
     return Status::fail(Errc::invalid_argument, "sgemm args");
   }
   // C (m x n) = A (m x k) * B (k x n), row-major via cblas
-  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, static_cast<int>(m), static_cast<int>(n),
-              static_cast<int>(k), alpha, a, static_cast<int>(k), b, static_cast<int>(n), beta, c, static_cast<int>(n));
+  compute::sgemm_nn(static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), alpha, a,
+                    static_cast<int>(k), b, static_cast<int>(n), beta, c, static_cast<int>(n));
   return Status::OK();
 }
 
@@ -215,13 +214,11 @@ Status AccelerateRunner::lm_head(std::span<const std::byte> hidden, Tensor* logi
     f16_to_f32(hidden, x);
   }
   std::vector<float> out(v, 0.f);
-  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, 1, static_cast<int>(v), static_cast<int>(h), 1.f,
-              x.data(), static_cast<int>(h), lm_w_.data(), static_cast<int>(h), 0.f, out.data(),
-              static_cast<int>(v));
-  Status st = Status::OK();
-  if (!st) {
-    return st;
+  if (x.size() < h) {
+    x.resize(h, 0.f);
   }
+  compute::sgemm_nt(1, static_cast<int>(v), static_cast<int>(h), 1.f, x.data(), static_cast<int>(h),
+                    lm_w_.data(), static_cast<int>(h), 0.f, out.data(), static_cast<int>(v));
   logits->header.magic = kTensorMagic;
   logits->header.dtype = static_cast<uint16_t>(DType::F32);
   logits->header.rank = 1;

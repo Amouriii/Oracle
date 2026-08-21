@@ -96,10 +96,14 @@ class LlamaCppRunner final : public NodeRunner {
   static Status read_gguf_meta(const std::string& path, ModelMeta* out);
   Status spawn_rpc(const std::string& binary, uint16_t port);
 
+  // Non-null once a GGUF file has been loaded: the real execution path.
+  [[nodiscard]] NodeRunner* backend() const noexcept { return impl_.get(); }
+
  private:
   ModelMeta model_{};
   LayerRange layers_{};
   std::string weights_path_;
+  std::unique_ptr<NodeRunner> impl_;
   int rpc_pid_{-1};
   int rpc_port_{0};
   bool library_linked_{false};
@@ -108,6 +112,9 @@ class LlamaCppRunner final : public NodeRunner {
 std::unique_ptr<NodeRunner> make_accelerate_runner();
 std::unique_ptr<NodeRunner> make_metal_runner();
 std::unique_ptr<NodeRunner> make_llamacpp_runner();
+std::unique_ptr<NodeRunner> make_gguf_runner();
+// kind: gguf | llamacpp | metal | accelerate.  "auto" picks the GGUF runner when
+// a model path is configured and the identity runner otherwise.
 std::unique_ptr<NodeRunner> make_runner(std::string_view kind);
 
 }  // namespace oracle

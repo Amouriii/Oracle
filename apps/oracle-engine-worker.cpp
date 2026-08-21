@@ -1,23 +1,78 @@
+// Oracle worker: owns one contiguous slice of the model's layers, receives
+// activations from the previous hop and forwards them to the next.
 #include "oracle/cluster_config.hpp"
+#include "oracle/compute/blas.hpp"
 #include "oracle/orch/pipeline_orchestrator.hpp"
 
-#include <chrono>
+#include <csignal>
 #include <cstring>
 #include <iostream>
-#include <thread>
+#include <string>
+
+namespace {
+
+oracle::PipelineOrchestrator* g_orch = nullptr;
+
+void on_signal(int) {
+  if (g_orch) {
+    g_orch->stop();
+  }
+  std::_Exit(0);
+}
+
+void usage() {
+  std::cout <<
+      "oracle-engine-worker --id N [options]\n"
+      "  --config PATH   cluster TOML (default configs/cluster.toml)\n"
+      "  --id N          this node's id (required)\n"
+      "  --model PATH    GGUF file, overriding [model] path\n"
+      "  --runner KIND   auto | gguf | llamacpp | accelerate | metal\n"
+      "  --threads N     compute threads\n"
+      "  --help\n";
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   std::string cfg_path = "configs/cluster.toml";
-  std::string runner = "accelerate";
+  std::string runner = "auto";
+  std::string model_override;
   oracle::NodeId id = 1;
+  bool have_id = false;
+  int threads = 0;
+
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
-      cfg_path = argv[++i];
-    } else if (std::strcmp(argv[i], "--id") == 0 && i + 1 < argc) {
-      id = static_cast<oracle::NodeId>(std::stoul(argv[++i]));
-    } else if (std::strcmp(argv[i], "--runner") == 0 && i + 1 < argc) {
-      runner = argv[++i];
+    const std::string a = argv[i];
+    auto next = [&](const char* what) -> std::string {
+      if (i + 1 >= argc) {
+        std::cerr << a << " needs " << what << "\n";
+        std::exit(2);
+      }
+      return argv[++i];
+    };
+    if (a == "--config") {
+      cfg_path = next("a path");
+    } else if (a == "--id") {
+      id = static_cast<oracle::NodeId>(std::stoul(next("a node id")));
+      have_id = true;
+    } else if (a == "--model") {
+      model_override = next("a path");
+    } else if (a == "--runner") {
+      runner = next("a runner kind");
+    } else if (a == "--threads") {
+      threads = std::stoi(next("a thread count"));
+    } else if (a == "--help" || a == "-h") {
+      usage();
+      return 0;
+    } else {
+      std::cerr << "unknown option " << a << "\n";
+      usage();
+      return 2;
     }
+  }
+  if (!have_id) {
+    std::cerr << "--id is required: a worker must know which layer shard it owns\n";
+    return 2;
   }
 
   oracle::ClusterConfig cfg;
@@ -26,101 +81,78 @@ int main(int argc, char** argv) {
     std::cerr << "config: " << st.message << "\n";
     return 1;
   }
+  if (!model_override.empty()) {
+    cfg.model.path = model_override;
+  }
+  if (threads > 0) {
+    oracle::compute::set_thread_count(threads);
+  } else if (cfg.server.compute_threads > 0) {
+    oracle::compute::set_thread_count(static_cast<int>(cfg.server.compute_threads));
+  }
 
   oracle::PipelineOrchestrator orch;
+  g_orch = &orch;
+  std::signal(SIGINT, on_signal);
+  std::signal(SIGTERM, on_signal);
+  std::signal(SIGPIPE, SIG_IGN);
+
   st = orch.init(cfg, oracle::make_runner(runner), id);
   if (!st) {
     std::cerr << "init: " << st.message << "\n";
     return 1;
   }
+
+  // A worker enforces the same cluster secret as the master; it has no HTTP
+  // surface, so API keys are irrelevant here.
+  oracle::security::SecurityConfig sec;
+  sec.require_api_key = false;
+  sec.api_key_env.clear();
+  sec.require_worker_auth = cfg.security.require_worker_auth;
+  sec.cluster_secret = cfg.security.cluster_secret;
+  sec.cluster_secret_env = cfg.security.cluster_secret_env;
+  sec.audit_log_path = cfg.security.audit_log_path;
+  sec.model_manifest_path = cfg.security.model_manifest;
+  sec.verify_model_integrity = cfg.security.verify_model_integrity;
+  sec.echo_security_log = cfg.security.echo_security_log;
+  st = orch.configure_security(sec);
+  if (!st) {
+    std::cerr << "security: " << st.message << "\n";
+    return 1;
+  }
+
   st = orch.start_transport();
   if (!st) {
     std::cerr << "listen: " << st.message << "\n";
     return 1;
   }
-  (void)orch.start_heartbeat();
-
-  oracle::NodeId prev = 0;
-  oracle::NodeId next = 0;
-  bool last = false;
-  const oracle::NodeConfig* prev_node = nullptr;
-  const oracle::NodeConfig* master = cfg.master();
-  for (size_t i = 0; i < cfg.nodes.size(); ++i) {
-    if (cfg.nodes[i].id != id) {
-      continue;
-    }
-    last = (i + 1 == cfg.nodes.size());
-    if (i > 0) {
-      prev = cfg.nodes[i - 1].id;
-      prev_node = &cfg.nodes[i - 1];
-    }
-    if (!last) {
-      next = cfg.nodes[i + 1].id;
-    }
+  st = orch.start_heartbeat();
+  if (!st) {
+    std::cerr << "heartbeat: " << st.message << "\n";
+    return 1;
   }
 
-  if (prev_node) {
-    bool ok = false;
-    for (int attempt = 0; attempt < 50; ++attempt) {
-      auto cs = orch.transport().connect(prev, prev_node->host, prev_node->transport_port);
-      if (cs) {
-        ok = true;
-        break;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-    if (!ok) {
-      std::cerr << "failed to connect to previous hop " << prev_node->host << "\n";
-      return 1;
-    }
-  }
-  if (last && master) {
-    for (int attempt = 0; attempt < 50; ++attempt) {
-      auto cs = orch.transport().connect(master->id, master->host, master->transport_port);
-      if (cs) {
-        break;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-  }
+  const auto* me = orch.config().find(id);
+  std::cout << "Oracle worker\n";
+  std::cout << "  node     " << id << " at " << (me ? me->host : "?") << ":"
+            << (me ? me->transport_port : 0) << "\n";
+  std::cout << "  layers   [" << (me ? me->layers.start : 0) << ", " << (me ? me->layers.end : 0)
+            << ")\n";
+  std::cout << "  runner   " << (orch.runner() ? orch.runner()->name() : "none") << " / "
+            << oracle::compute::backend_name() << " x" << oracle::compute::thread_count()
+            << " threads\n";
+  std::cout << "  waiting for the master to register...\n";
 
-  oracle::KvCache kv;
-  kv.allocate(oracle::plan_kv(orch.config().model, orch.runner()->layers()));
-  std::cout << "Oracle worker id=" << id << " prev=" << prev << " next=" << next << " last=" << last << "\n";
-
-  while (true) {
-    oracle::Tensor in;
-    st = orch.transport().recv_tensor(prev, &in, 600000);
-    if (!st) {
-      if (st.code == oracle::Errc::disconnected) {
-        std::cerr << "peer disconnected\n";
-        return 1;
-      }
-      continue;
-    }
-    if (in.header.flags & oracle::kFlagLayerBlob) {
-      orch.runner()->load_layer_blob(in.header.layer_id, in.payload);
-      continue;
-    }
-    oracle::Tensor hidden;
-    st = orch.runner()->forward(in.payload, kv, &hidden);
-    if (!st) {
-      std::cerr << "forward: " << st.message << "\n";
-      continue;
-    }
-    hidden.header.seq_id = in.header.seq_id;
-    hidden.header.token_id = in.header.token_id;
-    if (last) {
-      oracle::Tensor logits;
-      st = orch.runner()->lm_head(hidden.payload, &logits);
-      if (!st) {
-        continue;
-      }
-      logits.header.seq_id = in.header.seq_id;
-      const oracle::NodeId dest = master ? master->id : 0;
-      orch.transport().send_tensor(dest, logits);
-    } else {
-      orch.transport().send_tensor(next, hidden);
-    }
+  st = orch.connect_peers();
+  if (!st) {
+    std::cerr << "cluster: " << st.message << "\n";
+    return 1;
   }
+  std::cout << "  joined; serving activations\n";
+
+  st = orch.run_worker_loop();
+  if (!st) {
+    std::cerr << "worker loop: " << st.message << "\n";
+    return 1;
+  }
+  return 0;
 }

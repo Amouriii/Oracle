@@ -23,6 +23,16 @@ std::string trim(std::string s) {
   return s;
 }
 
+bool parse_bool(const std::string& s, bool def) {
+  if (s == "true" || s == "yes" || s == "on" || s == "1") {
+    return true;
+  }
+  if (s == "false" || s == "no" || s == "off" || s == "0") {
+    return false;
+  }
+  return def;
+}
+
 DType parse_dtype(const std::string& s) {
   if (s == "f16" || s == "F16") {
     return DType::F16;
@@ -114,6 +124,62 @@ Status load_cluster_toml(const std::string& path, ClusterConfig* out) {
         setu(cfg.heartbeat_misses);
       } else if (key == "heartbeat_interval_ms") {
         setu(cfg.heartbeat_interval_ms);
+      } else if (key == "max_sequences") {
+        setu(cfg.max_sequences);
+      }
+    } else if (section == "server") {
+      if (key == "max_concurrent") {
+        setu(cfg.server.max_concurrent);
+      } else if (key == "max_queue_depth") {
+        setu(cfg.server.max_queue_depth);
+      } else if (key == "queue_timeout_ms") {
+        setu(cfg.server.queue_timeout_ms);
+      } else if (key == "request_timeout_ms") {
+        setu(cfg.server.request_timeout_ms);
+      } else if (key == "compute_threads") {
+        setu(cfg.server.compute_threads);
+      }
+    } else if (section == "security") {
+      if (key == "require_api_key") {
+        cfg.security.require_api_key = parse_bool(val, cfg.security.require_api_key);
+      } else if (key == "api_key_file") {
+        cfg.security.api_key_file = val;
+      } else if (key == "api_key_env") {
+        cfg.security.api_key_env = val;
+      } else if (key == "cluster_secret") {
+        cfg.security.cluster_secret = val;
+      } else if (key == "cluster_secret_env") {
+        cfg.security.cluster_secret_env = val;
+      } else if (key == "require_worker_auth") {
+        cfg.security.require_worker_auth = parse_bool(val, cfg.security.require_worker_auth);
+      } else if (key == "max_request_bytes") {
+        cfg.security.max_request_bytes = std::stoull(val);
+      } else if (key == "max_prompt_chars") {
+        setu(cfg.security.max_prompt_chars);
+      } else if (key == "max_completion_tokens") {
+        setu(cfg.security.max_completion_tokens);
+      } else if (key == "max_messages") {
+        setu(cfg.security.max_messages);
+      } else if (key == "max_concurrent_requests") {
+        setu(cfg.security.max_concurrent_requests);
+      } else if (key == "max_concurrent_per_key") {
+        setu(cfg.security.max_concurrent_per_key);
+      } else if (key == "requests_per_minute") {
+        setu(cfg.security.requests_per_minute);
+      } else if (key == "burst") {
+        setu(cfg.security.burst);
+      } else if (key == "abuse_threshold") {
+        setu(cfg.security.abuse_threshold);
+      } else if (key == "ban_seconds") {
+        setu(cfg.security.ban_seconds);
+      } else if (key == "audit_log") {
+        cfg.security.audit_log_path = val;
+      } else if (key == "model_manifest") {
+        cfg.security.model_manifest = val;
+      } else if (key == "verify_model_integrity") {
+        cfg.security.verify_model_integrity = parse_bool(val, cfg.security.verify_model_integrity);
+      } else if (key == "echo_security_log") {
+        cfg.security.echo_security_log = parse_bool(val, cfg.security.echo_security_log);
       }
     } else if (section == "model") {
       if (key == "name") {
@@ -203,6 +269,16 @@ Status save_cluster_toml(const std::string& path, const ClusterConfig& cfg) {
   out << "head_dim = " << cfg.model.head_dim << "\n";
   out << "n_vocab = " << cfg.model.n_vocab << "\n";
   out << "max_seq = " << cfg.model.max_seq << "\n\n";
+  out << "[server]\n";
+  out << "max_concurrent = " << cfg.server.max_concurrent << "\n";
+  out << "max_queue_depth = " << cfg.server.max_queue_depth << "\n";
+  out << "queue_timeout_ms = " << cfg.server.queue_timeout_ms << "\n";
+  out << "request_timeout_ms = " << cfg.server.request_timeout_ms << "\n\n";
+  out << "[security]\n";
+  out << "require_api_key = " << (cfg.security.require_api_key ? "true" : "false") << "\n";
+  out << "require_worker_auth = " << (cfg.security.require_worker_auth ? "true" : "false") << "\n";
+  out << "requests_per_minute = " << cfg.security.requests_per_minute << "\n";
+  out << "max_concurrent_requests = " << cfg.security.max_concurrent_requests << "\n\n";
   for (const auto& n : cfg.nodes) {
     out << "[[nodes]]\n";
     out << "id = " << n.id << "\n";
