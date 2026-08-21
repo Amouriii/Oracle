@@ -14,7 +14,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      # Homebrew's python on the macOS runners is externally managed (PEP 668),
+      # so `pip install` into it fails; setup-python gives both platforms an
+      # interpreter we are allowed to install into.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -39,7 +46,7 @@ jobs:
     name: docker image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # The image build runs the test suite inside the builder stage.
       - run: docker build -t oracle:ci .
       - name: Smoke-test the image

@@ -15,9 +15,19 @@ TOKENS="${TOKENS:-1,260,261,262}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-if ! python3 -c "import numpy" 2>/dev/null; then
-  echo "numpy is required: pip install numpy" >&2
-  exit 2
+PY=python3
+if ! "${PY}" -c "import numpy" 2>/dev/null; then
+  # Many system pythons are externally managed (PEP 668) and refuse a plain
+  # `pip install`, so fall back to a throwaway virtualenv rather than telling
+  # the user to fight their package manager.
+  echo "numpy not found; creating a temporary virtualenv"
+  if "${PY}" -m venv "${WORK}/venv" 2>/dev/null &&
+     "${WORK}/venv/bin/python" -m pip install --quiet --disable-pip-version-check numpy; then
+    PY="${WORK}/venv/bin/python"
+  else
+    echo "could not obtain numpy; install it and re-run (pip install numpy)" >&2
+    exit 2
+  fi
 fi
 [[ -x "${BUILD}/oracle-model-info" ]] || "${ROOT}/scripts/build.sh"
 
@@ -39,5 +49,5 @@ fi
 
 echo "tokens: ${TOKENS}"
 "${BUILD}/oracle-model-info" "${MODEL}" --logits "${TOKENS}" > "${WORK}/engine.txt"
-python3 "${ROOT}/tests/reference_llama.py" "${MODEL}" \
+"${PY}" "${ROOT}/tests/reference_llama.py" "${MODEL}" \
   --tokens "${TOKENS}" --compare "${WORK}/engine.txt"

@@ -154,7 +154,7 @@ add_executable(oracle-engine-bench-net apps/oracle-engine-bench-net.cpp)
 target_link_libraries(oracle-engine-bench-net PRIVATE oracle_tb3)
 
 add_executable(oracle-model-info apps/oracle-model-info.cpp)
-target_link_libraries(oracle-model-info PRIVATE oracle_model oracle_runner)
+target_link_libraries(oracle-model-info PRIVATE oracle_runner)
 
 # ----------------------------------------------------------------- tests ------
 if(ORACLE_BUILD_TESTS)
@@ -171,7 +171,7 @@ if(ORACLE_BUILD_TESTS)
   target_link_libraries(test_shard_plan PRIVATE oracle_shard)
   target_link_libraries(test_pipeline_tiny PRIVATE oracle_orch)
   target_link_libraries(test_transport_tcp PRIVATE oracle_tb3)
-  target_link_libraries(test_gguf PRIVATE oracle_model oracle_runner)
+  target_link_libraries(test_gguf PRIVATE oracle_runner)
   target_link_libraries(test_quant PRIVATE oracle_model)
   target_link_libraries(test_tokenizer PRIVATE oracle_model)
   target_link_libraries(test_security PRIVATE oracle_security)
