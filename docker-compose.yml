@@ -1,0 +1,63 @@
+# A three-container Oracle mesh on one host: the master plus two workers, each
+# owning a third of the model's layers.
+#
+#   export ORACLE_CLUSTER_SECRET=$(openssl rand -hex 32)
+#   export ORACLE_API_KEYS="demo:$(openssl rand -hex 24)"
+#   MODEL=/absolute/path/to/model.gguf docker compose up
+#
+# Every node needs the same model file: layer weights are read locally rather
+# than streamed, so the container shares one read-only mount.
+
+x-oracle: &oracle
+  image: oracle:latest
+  build:
+    context: .
+  volumes:
+    - ${MODEL:?set MODEL to the host path of a .gguf file}:/models/model.gguf:ro
+    - ./configs:/etc/oracle:ro
+  environment:
+    ORACLE_CLUSTER_SECRET: ${ORACLE_CLUSTER_SECRET:?set ORACLE_CLUSTER_SECRET}
+  networks: [mesh]
+  restart: unless-stopped
+  init: true
+
+services:
+  worker1:
+    <<: *oracle
+    container_name: oracle-worker1
+    command: >
+      oracle-engine-worker --config /etc/oracle/compose.toml --id 1
+      --model /models/model.gguf
+    expose: ["9200", "9100/udp"]
+
+  worker2:
+    <<: *oracle
+    container_name: oracle-worker2
+    command: >
+      oracle-engine-worker --config /etc/oracle/compose.toml --id 2
+      --model /models/model.gguf
+    expose: ["9200", "9100/udp"]
+
+  master:
+    <<: *oracle
+    container_name: oracle-master
+    # The master dials the workers, so they must be listening first.
+    depends_on: [worker1, worker2]
+    environment:
+      ORACLE_CLUSTER_SECRET: ${ORACLE_CLUSTER_SECRET:?set ORACLE_CLUSTER_SECRET}
+      ORACLE_API_KEYS: ${ORACLE_API_KEYS:?set ORACLE_API_KEYS to id:secret pairs}
+    command: >
+      oracle-engine-master --config /etc/oracle/compose.toml --id 0
+      --model /models/model.gguf
+    ports:
+      - "${ORACLE_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 120s
+      retries: 5
+
+networks:
+  mesh:
+    driver: bridge

@@ -1,0 +1,13 @@
+build/
+cmake-build-*/
+.git/
+.github/
+*.gguf
+*.o
+*.a
+*.so
+*.dylib
+.venv/
+__pycache__/
+compile_commands.json
+oracle-security.log

@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    name: build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      # Homebrew's python on the macOS runners is externally managed (PEP 668),
+      # so `pip install` into it fails; setup-python gives both platforms an
+      # interpreter we are allowed to install into.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      # Compares the transformer against an independent NumPy implementation.
+      - name: Reference cross-check
+        run: |
+          python3 -m pip install --quiet numpy
+          scripts/verify_reference.sh
+
+      # Boots a real two-node mesh over TCP and drives it through the HTTP API.
+      - name: End-to-end
+        run: scripts/e2e_test.sh
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The image build runs the test suite inside the builder stage.
+      - run: docker build -t oracle:ci .
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+          # Not --rm: the container's own logs are the only diagnosis available
+          # when it exits before serving, so keep them.
+          docker run -d --name oracle-ci -p 8000:8000 oracle:ci \
+            oracle-engine-master --config /etc/oracle/single.toml --single --no-auth
+          ready=0
+          for _ in $(seq 1 60); do
+            sleep 1
+            if curl -fsS -o /dev/null http://127.0.0.1:8000/health; then ready=1; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' oracle-ci)" != "true" ]; then break; fi
+          done
+          if [ "${ready}" != "1" ]; then
+            echo "::error::the container never served /health"
+            docker logs oracle-ci || true
+            docker inspect -f 'exit code: {{.State.ExitCode}}' oracle-ci || true
+            docker rm -f oracle-ci || true
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8000/health
+          echo
+          curl -fsS http://127.0.0.1:8000/v1/models
+          echo
+          curl -fsS -X POST http://127.0.0.1:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4}'
+          echo
+          docker rm -f oracle-ci

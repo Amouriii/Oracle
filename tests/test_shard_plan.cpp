@@ -1,5 +1,7 @@
 #include "oracle/shard/memory_shard_manager.hpp"
 
+#include "check.hpp"
+
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -56,8 +58,8 @@ vram_budget_gb = 4
     std::cerr << st.message << "\n";
     return 1;
   }
-  assert(cfg.nodes.size() == 3);
-  assert(cfg.model.n_layers == 80);
+  CHECK(cfg.nodes.size() == 3);
+  CHECK(cfg.model.n_layers == 80);
 
   oracle::MemoryShardManager mgr(cfg);
   oracle::ShardPlan plan;
@@ -66,16 +68,16 @@ vram_budget_gb = 4
     std::cerr << st.message << "\n";
     return 1;
   }
-  assert(plan.nodes[0].layers.start == 0);
-  assert(plan.nodes[2].layers.end == 80);
+  CHECK(plan.nodes[0].layers.start == 0);
+  CHECK(plan.nodes[2].layers.end == 80);
   uint32_t covered = 0;
   for (const auto& n : plan.nodes) {
     covered += n.layers.count();
     const auto kv = oracle::plan_kv(cfg.model, n.layers);
-    assert(kv.n_local_layers == n.layers.count());
-    assert(kv.bytes_total > 0);
+    CHECK(kv.n_local_layers == n.layers.count());
+    CHECK(kv.bytes_total > 0);
   }
-  assert(covered == 80);
+  CHECK(covered == 80);
   std::cout << "test_shard_plan ok feasible=" << plan.feasible << " kv_bytes=" << plan.kv_bytes_total
             << " reason=" << plan.reason << "\n";
 

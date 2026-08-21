@@ -1,6 +1,8 @@
 #include "oracle/tb3/socket_transport.hpp"
 
 #include <atomic>
+#include "check.hpp"
+
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -74,8 +76,8 @@ int main() {
     std::cerr << "recv " << st.message << " err=" << err << "\n";
     return 1;
   }
-  assert(echo.header.seq_id == 7);
-  assert(echo.payload == payload);
+  CHECK(echo.header.seq_id == 7);
+  CHECK(echo.payload == payload);
   if (!ok && err.size()) {
     std::cerr << err << "\n";
     return 1;

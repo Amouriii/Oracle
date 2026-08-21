@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
+# Phase 2 - allocation: does the model fit across the configured RAM budgets?
+#
+#   scripts/phase2_alloc_test.sh [model.gguf] [gb,gb,gb]
 set -euo pipefail
-# Phase 2: MemoryShardManager dry-run for 70B-Q4 vs RAM budgets. No weights required.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${ROOT}/build/test_shard_plan"
-CFG="${ROOT}/configs/cluster.toml"
-echo "== shard plan (${CFG}) =="
-if [[ -x "${BIN}" ]]; then
-  "${BIN}"
-else
-  echo "building tests..."
-  cmake -S "${ROOT}" -B "${ROOT}/build" -DORACLE_BUILD_PYTHON=OFF
-  cmake --build "${ROOT}/build" --target test_shard_plan
-  "${ROOT}/build/test_shard_plan"
+MODEL="${1:-}"
+SPLIT="${2:-32,32,32}"
+
+if [[ ! -x "${ROOT}/build/oracle-model-info" ]]; then
+  "${ROOT}/scripts/build.sh"
 fi
-echo "PressureMonitor refuses overcommit against ram_budget_gb in cluster.toml."
-echo "70B Q4 (~35-40 GiB weights + KV) must fit pooled node RAM, not 2-4 GiB dGPU."
+
+echo "== shard planner against configs/cluster.toml =="
+ctest --test-dir "${ROOT}/build" -R shard_plan --output-on-failure
+
+if [[ -n "${MODEL}" ]]; then
+  echo
+  echo "== ${MODEL} across budgets ${SPLIT} GiB =="
+  "${ROOT}/build/oracle-model-info" "${MODEL}" --split "${SPLIT}"
+else
+  echo
+  echo "pass a .gguf path to get a real per-node plan:"
+  echo "  $0 /models/model.gguf 32,32,32"
+fi

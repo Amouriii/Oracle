@@ -4,8 +4,8 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "oracle-engine"
-version = "0.1.0"
-description = "Thunderbolt-3 sharded LLM engine: transport, RAM pipeline, OpenAI HTTP"
+version = "0.2.0"
+description = "Oracle: one LLM across several machines, with an OpenAI-compatible API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

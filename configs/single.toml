@@ -1,0 +1,38 @@
+# One machine, whole model.  The quickest way to check a GGUF actually runs:
+#
+#   oracle-engine-master --config configs/single.toml --model /models/model.gguf --no-auth
+
+[cluster]
+name = "oracle-single"
+http_port = 8000
+transport_port = 9200
+heartbeat_port = 9100
+max_sequences = 4
+
+[model]
+path = ""
+max_seq = 4096
+act_dtype = "f16"
+
+[server]
+max_concurrent = 2
+max_queue_depth = 32
+queue_timeout_ms = 30000
+
+[security]
+require_api_key = true
+# Keys come from $ORACLE_API_KEYS ("id:secret[,id2:secret2]"), from
+# configs/api_keys if you create one, or from --api-key on the command line.
+# Starting with none of them configured is a startup error, not an open door;
+# pass --no-auth if that is what you actually want.
+api_key_file = "configs/api_keys"
+require_worker_auth = false
+requests_per_minute = 600
+burst = 60
+
+[[nodes]]
+id = 0
+role = "master"
+host = "127.0.0.1"
+ram_budget_gb = 16.0
+vram_budget_gb = 0.0
