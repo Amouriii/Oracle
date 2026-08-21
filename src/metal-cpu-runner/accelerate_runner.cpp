@@ -51,13 +51,6 @@ void f32_to_f16(std::span<const float> in, std::vector<std::byte>& out) {
   }
 }
 
-void identity_square(std::vector<float>& w, uint32_t n) {
-  w.assign(static_cast<size_t>(n) * n, 0.f);
-  for (uint32_t i = 0; i < n; ++i) {
-    w[i * n + i] = 1.f;
-  }
-}
-
 }  // namespace
 
 Status KvCache::allocate(const KvLayout& l) {
@@ -81,23 +74,18 @@ void KvCache::reset() {
 Status AccelerateRunner::load_layers(const ModelMeta& model, LayerRange layers, std::string_view) {
   model_ = model;
   layers_ = layers;
-  const uint32_t h = model.hidden_dim;
-  const uint32_t n = layers.count();
-  w_in_.resize(n);
-  w_out_.resize(n);
-  for (uint32_t i = 0; i < n; ++i) {
-    identity_square(w_in_[i], h);
-    identity_square(w_out_[i], h);
-  }
-  embed_w_.assign(static_cast<size_t>(model.n_vocab) * h, 0.f);
-  for (uint32_t t = 0; t < model.n_vocab && t < h; ++t) {
-    embed_w_[static_cast<size_t>(t) * h + (t % h)] = 1.f;
-  }
-  lm_w_.assign(static_cast<size_t>(model.n_vocab) * h, 0.f);
-  for (uint32_t t = 0; t < model.n_vocab && t < h; ++t) {
-    lm_w_[static_cast<size_t>(t) * h + (t % h)] = 1.f;
-  }
+  // Every weight this runner uses is an identity, so none of them is stored.
+  // Materialising them as dense matrices would cost n_layers * 2 * hidden^2
+  // floats -- about 43 GB at the 70B-shaped defaults, which is how a node with
+  // no model configured used to die of bad_alloc at startup.
   return Status::OK();
+}
+
+// The embedding and output "matrices" are the identity restricted to the first
+// min(n_vocab, hidden) rows: row t is one-hot at column t, and every row beyond
+// that is zero.  These two helpers are the whole of it.
+uint32_t AccelerateRunner::identity_rows() const noexcept {
+  return std::min(model_.n_vocab, model_.hidden_dim);
 }
 
 Status AccelerateRunner::load_layer_blob(uint32_t layer, std::span<const std::byte> blob) {
@@ -124,14 +112,14 @@ Status AccelerateRunner::embed(std::span<const int32_t> tokens, Tensor* out) {
     return Status::fail(Errc::invalid_argument, "null out");
   }
   const uint32_t h = model_.hidden_dim;
+  const uint32_t rows = identity_rows();
   std::vector<float> acc(h, 0.f);
   for (auto tok : tokens) {
     if (tok < 0 || static_cast<uint32_t>(tok) >= model_.n_vocab) {
       continue;
     }
-    const float* row = embed_w_.data() + static_cast<size_t>(tok) * h;
-    for (uint32_t i = 0; i < h; ++i) {
-      acc[i] += row[i];
+    if (static_cast<uint32_t>(tok) < rows) {
+      acc[static_cast<size_t>(tok)] += 1.f;
     }
   }
   if (!tokens.empty()) {
@@ -169,18 +157,8 @@ Status AccelerateRunner::forward(std::span<const std::byte> in, KvCache& kv, Ten
   if (x.size() < h) {
     x.resize(h, 0.f);
   }
-  std::vector<float> tmp(h), y(h);
-  for (size_t li = 0; li < w_in_.size(); ++li) {
-    auto st = gemm_f32(1, h, h, x.data(), w_in_[li].data(), tmp.data());
-    if (!st) {
-      return st;
-    }
-    st = gemm_f32(1, h, h, tmp.data(), w_out_[li].data(), y.data());
-    if (!st) {
-      return st;
-    }
-    x.swap(y);
-  }
+  // Each layer is two identity multiplies, i.e. a no-op on the activations.
+  x.resize(h);
   if (kv.seq_len + 1 <= kv.layout.max_seq) {
     ++kv.seq_len;
   }
@@ -213,12 +191,15 @@ Status AccelerateRunner::lm_head(std::span<const std::byte> hidden, Tensor* logi
   } else {
     f16_to_f32(hidden, x);
   }
-  std::vector<float> out(v, 0.f);
   if (x.size() < h) {
     x.resize(h, 0.f);
   }
-  compute::sgemm_nt(1, static_cast<int>(v), static_cast<int>(h), 1.f, x.data(), static_cast<int>(h),
-                    lm_w_.data(), static_cast<int>(h), 0.f, out.data(), static_cast<int>(v));
+  // logits[t] = x[t] for the one-hot rows, 0 beyond them.
+  std::vector<float> out(v, 0.f);
+  const uint32_t rows = identity_rows();
+  for (uint32_t t = 0; t < rows; ++t) {
+    out[t] = x[t];
+  }
   logits->header.magic = kTensorMagic;
   logits->header.dtype = static_cast<uint16_t>(DType::F32);
   logits->header.rank = 1;

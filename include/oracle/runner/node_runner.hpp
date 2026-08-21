@@ -50,12 +50,11 @@ class AccelerateRunner final : public NodeRunner {
                   float alpha = 1.f, float beta = 0.f);
 
  private:
+  // Rows of the embedding / output identity that are actually one-hot.
+  [[nodiscard]] uint32_t identity_rows() const noexcept;
+
   ModelMeta model_{};
   LayerRange layers_{};
-  std::vector<std::vector<float>> w_in_;
-  std::vector<std::vector<float>> w_out_;
-  std::vector<float> embed_w_;
-  std::vector<float> lm_w_;
 };
 
 class MetalNodeRunner final : public NodeRunner {
