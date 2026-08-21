@@ -337,7 +337,7 @@ inline ParseResult parse(std::string_view text) {
     r.error = "document is too large";
     return r;
   }
-  detail::Parser p{text};
+  detail::Parser p{text, 0, 0, {}};
   Value v;
   if (!p.parse_value(&v)) {
     r.error = p.error.empty() ? "invalid JSON" : p.error;

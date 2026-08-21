@@ -38,12 +38,18 @@ Status SecurityGate::configure(const SecurityConfig& cfg) {
   bool have_keys = keys_.size() > 0;
   if (!cfg_.api_key_file.empty()) {
     auto st = keys_.load_file(cfg_.api_key_file);
-    if (!st) {
+    if (st) {
+      have_keys = true;
+      audit_.info("config", "api_keys", "loaded " + std::to_string(keys_.size()) + " keys from " +
+                                            cfg_.api_key_file);
+    } else if (st.code == Errc::not_found) {
+      // The configured path simply is not there; other sources may still supply
+      // keys, and the "no keys at all" check below is what actually refuses to
+      // start.  A file that exists but is malformed is still fatal.
+      audit_.warn("config", "api_keys", st.message);
+    } else {
       return Status::fail(st.code, "api keys: " + st.message);
     }
-    have_keys = true;
-    audit_.info("config", "api_keys", "loaded " + std::to_string(keys_.size()) + " keys from " +
-                                          cfg_.api_key_file);
   }
   if (!cfg_.api_key_env.empty()) {
     auto st = keys_.load_env(cfg_.api_key_env.c_str());

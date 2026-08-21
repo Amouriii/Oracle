@@ -45,7 +45,7 @@ services:
     depends_on: [worker1, worker2]
     environment:
       ORACLE_CLUSTER_SECRET: ${ORACLE_CLUSTER_SECRET:?set ORACLE_CLUSTER_SECRET}
-      ORACLE_API_KEYS: ${ORACLE_API_KEYS:?set ORACLE_API_KEYS, e.g. demo:$(openssl rand -hex 24)}
+      ORACLE_API_KEYS: ${ORACLE_API_KEYS:?set ORACLE_API_KEYS to id:secret pairs}
     command: >
       oracle-engine-master --config /etc/oracle/compose.toml --id 0
       --model /models/model.gguf

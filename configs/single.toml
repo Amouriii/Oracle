@@ -21,6 +21,10 @@ queue_timeout_ms = 30000
 
 [security]
 require_api_key = true
+# Keys come from $ORACLE_API_KEYS ("id:secret[,id2:secret2]"), from
+# configs/api_keys if you create one, or from --api-key on the command line.
+# Starting with none of them configured is a startup error, not an open door;
+# pass --no-auth if that is what you actually want.
 api_key_file = "configs/api_keys"
 require_worker_auth = false
 requests_per_minute = 600

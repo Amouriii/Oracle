@@ -49,4 +49,7 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=60s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/health || exit 1
 
 ENTRYPOINT []
-CMD ["oracle-engine-master", "--config", "/etc/oracle/single.toml"]
+# Runs the whole model on this container.  Authentication is on by default, so
+# supply ORACLE_API_KEYS (or override the command with --no-auth):
+#   docker run -e ORACLE_API_KEYS="demo:$(openssl rand -hex 24)" ...
+CMD ["oracle-engine-master", "--config", "/etc/oracle/single.toml", "--single"]
